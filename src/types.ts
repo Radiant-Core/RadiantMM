@@ -1,6 +1,74 @@
 /**
  * Core types for RadiantMM SDK
+ * 
+ * Glyph v2 Token Standard Support
+ * Reference: https://github.com/Radiant-Core/Glyph-Token-Standards
  */
+
+/**
+ * Glyph v2 Protocol IDs
+ */
+export const GlyphProtocol = {
+  GLYPH_FT: 1,        // Fungible Token
+  GLYPH_NFT: 2,       // Non-Fungible Token
+  GLYPH_DAT: 3,       // Data Storage
+  GLYPH_DMINT: 4,     // Decentralized Minting
+  GLYPH_MUT: 5,       // Mutable State
+  GLYPH_BURN: 6,      // Explicit Burn
+  GLYPH_CONTAINER: 7, // Container/Collection
+  GLYPH_ENCRYPTED: 8, // Encrypted Content
+  GLYPH_TIMELOCK: 9,  // Timelocked Reveal
+  GLYPH_AUTHORITY: 10, // Issuer Authority
+  GLYPH_WAVE: 11,     // WAVE Naming
+} as const;
+
+export type GlyphProtocolId = typeof GlyphProtocol[keyof typeof GlyphProtocol];
+
+/**
+ * Glyph v2 token metadata (minimal for pool operations)
+ */
+export interface GlyphTokenMeta {
+  v: number;              // Version (2 for v2)
+  p: number[];            // Protocol IDs
+  ticker?: string;        // Token ticker
+  decimals?: number;      // Token decimals (default 8)
+  royalty?: {
+    bps: number;          // Royalty basis points (0-10000)
+    address: string;      // Royalty recipient
+    enforced?: boolean;   // On-chain enforcement
+  };
+}
+
+/**
+ * Check if token is a valid v2 FT for pool operations
+ */
+export function isValidPoolToken(meta: GlyphTokenMeta): boolean {
+  return meta.v === 2 && 
+         Array.isArray(meta.p) && 
+         meta.p.includes(GlyphProtocol.GLYPH_FT);
+}
+
+/**
+ * Get token decimals (default 8 per Glyph v2 spec)
+ */
+export function getTokenDecimals(meta: GlyphTokenMeta): number {
+  return typeof meta.decimals === 'number' ? meta.decimals : 8;
+}
+
+/**
+ * Check if token has enforced royalties that affect trades
+ */
+export function hasEnforcedRoyalty(meta: GlyphTokenMeta): boolean {
+  return !!meta.royalty?.enforced && meta.royalty.bps > 0;
+}
+
+/**
+ * Calculate royalty amount for a trade
+ */
+export function calculateRoyalty(amount: bigint, meta: GlyphTokenMeta): bigint {
+  if (!meta.royalty || meta.royalty.bps <= 0) return 0n;
+  return (amount * BigInt(meta.royalty.bps)) / 10000n;
+}
 
 /** A UTXO (Unspent Transaction Output) */
 export interface UTXO {
