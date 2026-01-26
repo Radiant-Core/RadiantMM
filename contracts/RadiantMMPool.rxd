@@ -1,0 +1,91 @@
+// RadiantMM Micro-Pool Contract v1.0
+// SPDX-License-Identifier: MIT
+//
+// A Constant Product Market Maker (CPMM) contract for Radiant blockchain.
+// Enables trustless, permissionless token swaps using the K = x * y invariant.
+
+pragma radiant ^1.0.0;
+
+contract RadiantMMPool(
+    bytes20 ownerPkh,      // Owner's public key hash (for withdrawals)
+    bytes32 tokenRef       // Glyph token reference identifier
+) {
+    // =========================================================================
+    // Path 1: Withdrawal (Owner Only)
+    // =========================================================================
+    // Allows the pool owner to withdraw all funds by providing a valid signature.
+    // No constraints on output configuration - owner has full control.
+    //
+    function withdraw(pubkey pk, sig s) {
+        // Verify the provided public key hashes to the stored owner PKH
+        require(hash160(pk) == ownerPkh);
+        
+        // Verify the signature is valid for this transaction
+        require(checkSig(s, pk));
+    }
+    
+    // =========================================================================
+    // Path 2: Trade (Anyone)
+    // =========================================================================
+    // Allows anyone to swap RXD <-> TOKEN while maintaining the constant product.
+    // The contract enforces:
+    //   1. Contract continuity (same bytecode in output at same index)
+    //   2. K_output >= K_input (constant product maintained after fee)
+    //
+    function trade() {
+        // ---------------------------------------------------------------------
+        // Step 1: Verify Contract Continuity
+        // ---------------------------------------------------------------------
+        // The contract must continue to exist at the same output index.
+        // This prevents the contract from being "killed" during a trade.
+        //
+        bytes inputBytecode = tx.inputs[this.activeInputIndex].lockingBytecode;
+        bytes outputBytecode = tx.outputs[this.activeInputIndex].lockingBytecode;
+        require(outputBytecode == inputBytecode);
+        
+        // ---------------------------------------------------------------------
+        // Step 2: Get Input State (Before Trade)
+        // ---------------------------------------------------------------------
+        // RXD amount: the satoshi value locked in this UTXO
+        // Token amount: tracked via state script or reference system
+        //
+        int rxdIn = tx.inputs[this.activeInputIndex].value;
+        int tokenIn = tx.inputs[this.activeInputIndex].stateValue;  // Token amount from state
+        
+        // Calculate input K (the invariant before the trade)
+        int kInput = rxdIn * tokenIn;
+        
+        // ---------------------------------------------------------------------
+        // Step 3: Get Output State (After Trade)
+        // ---------------------------------------------------------------------
+        int rxdOut = tx.outputs[this.activeInputIndex].value;
+        int tokenOut = tx.outputs[this.activeInputIndex].stateValue;  // Token amount from state
+        
+        // ---------------------------------------------------------------------
+        // Step 4: Calculate Fee
+        // ---------------------------------------------------------------------
+        // Fee is 0.3% (3/1000) of the absolute RXD delta.
+        // This fee accrues to the liquidity provider by increasing K.
+        //
+        int rxdDelta = rxdOut - rxdIn;
+        int fee = abs(rxdDelta) * 3 / 1000;
+        
+        // ---------------------------------------------------------------------
+        // Step 5: Calculate Effective Output K
+        // ---------------------------------------------------------------------
+        // The fee is subtracted from the output RXD to calculate effective K.
+        // For buys (RXD increases): fee comes from the added RXD
+        // For sells (RXD decreases): fee comes from the removed RXD
+        //
+        int effectiveRxdOut = rxdOut - fee;
+        int kOutput = effectiveRxdOut * tokenOut;
+        
+        // ---------------------------------------------------------------------
+        // Step 6: Enforce Constant Product Invariant
+        // ---------------------------------------------------------------------
+        // K must not decrease. In practice, K will slightly increase due to
+        // rounding in the fee calculation, which benefits the LP.
+        //
+        require(kOutput >= kInput);
+    }
+}

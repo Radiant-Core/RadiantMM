@@ -1,0 +1,130 @@
+# RadiantMM v1.0 - Optimized Bitcoin Script
+# SPDX-License-Identifier: MIT
+#
+# Constant Product Market Maker contract for Radiant blockchain
+# Target size: <500 bytes
+#
+# Layout: [CODE][OP_STATESEPARATOR][STATE: <8:token_amount>]
+#
+# Paths:
+#   1. Withdrawal: <sig> <pubkey> → owner reclaims funds
+#   2. Trade: (empty) → anyone swaps while maintaining K
+#
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Path Selection: Check unlock script depth
+# ------------------------------------------------------------------------------
+# If sig+pubkey provided (depth >= 2), take withdrawal path
+# If empty unlock (depth == 0), take trade path
+
+OP_DEPTH                              # [depth]
+OP_IF                                 # If depth > 0 (withdrawal)
+
+    # ==========================================================================
+    # WITHDRAWAL PATH
+    # ==========================================================================
+    # Unlock: <signature> <pubkey>
+    # Verifies owner identity and signature
+    
+    OP_DUP                            # [sig, pk, pk]
+    OP_HASH160                        # [sig, pk, hash160(pk)]
+    <20:owner_pkh>                    # [sig, pk, hash160(pk), owner_pkh]  -- PARAMETER
+    OP_EQUALVERIFY                    # [sig, pk] -- verifies owner
+    OP_CHECKSIG                       # [bool] -- verifies signature
+
+OP_ELSE
+
+    # ==========================================================================
+    # TRADE PATH
+    # ==========================================================================
+    # Unlock: (empty)
+    # Anyone can trade as long as K is maintained
+    
+    # --------------------------------------------------------------------------
+    # Step 1: Verify Contract Continuity
+    # --------------------------------------------------------------------------
+    # Output bytecode must equal input bytecode (same code, state may differ)
+    # This ensures the contract lives on after the trade
+    
+    OP_INPUTINDEX                     # [idx]
+    OP_OUTPUTBYTECODE                 # [out_bytecode]
+    OP_INPUTINDEX                     # [out_bytecode, idx]
+    OP_UTXOBYTECODE                   # [out_bytecode, in_bytecode]
+    OP_EQUALVERIFY                    # [] -- verifies continuity
+    
+    # --------------------------------------------------------------------------
+    # Step 2: Calculate K_input = RXD_in * Token_in
+    # --------------------------------------------------------------------------
+    
+    OP_INPUTINDEX                     # [idx]
+    OP_UTXOVALUE                      # [rxd_in]
+    
+    # Get token amount from state (last 8 bytes of locking script)
+    OP_INPUTINDEX                     # [rxd_in, idx]
+    OP_UTXOBYTECODE                   # [rxd_in, in_bytecode]
+    OP_SIZE                           # [rxd_in, in_bytecode, len]
+    <1:08>                            # [rxd_in, in_bytecode, len, 8]
+    OP_SUB                            # [rxd_in, in_bytecode, len-8]
+    OP_SPLIT                          # [rxd_in, code_part, state_part]
+    OP_NIP                            # [rxd_in, state_part(8 bytes)]
+    OP_BIN2NUM                        # [rxd_in, token_in]
+    
+    OP_TUCK                           # [token_in, rxd_in, token_in]
+    OP_MUL                            # [token_in, k_in]
+    OP_SWAP                           # [k_in, token_in]
+    
+    # --------------------------------------------------------------------------
+    # Step 3: Calculate Fee = |RXD_out - RXD_in| * 3 / 1000
+    # --------------------------------------------------------------------------
+    
+    OP_INPUTINDEX                     # [k_in, token_in, idx]
+    OP_UTXOVALUE                      # [k_in, token_in, rxd_in]
+    OP_INPUTINDEX                     # [k_in, token_in, rxd_in, idx]
+    OP_OUTPUTVALUE                    # [k_in, token_in, rxd_in, rxd_out]
+    
+    OP_TUCK                           # [k_in, token_in, rxd_out, rxd_in, rxd_out]
+    OP_SUB                            # [k_in, token_in, rxd_out, rxd_delta]
+    OP_ABS                            # [k_in, token_in, rxd_out, |rxd_delta|]
+    <1:03>                            # [k_in, token_in, rxd_out, |rxd_delta|, 3]
+    OP_MUL                            # [k_in, token_in, rxd_out, |rxd_delta|*3]
+    <2:e803>                          # [k_in, token_in, rxd_out, |rxd_delta|*3, 1000] (little-endian)
+    OP_DIV                            # [k_in, token_in, rxd_out, fee]
+    
+    # --------------------------------------------------------------------------
+    # Step 4: Calculate K_output = (RXD_out - fee) * Token_out
+    # --------------------------------------------------------------------------
+    
+    OP_SUB                            # [k_in, token_in, effective_rxd_out]
+    
+    # Get token_out from output state
+    OP_INPUTINDEX                     # [k_in, token_in, eff_rxd, idx]
+    OP_OUTPUTBYTECODE                 # [k_in, token_in, eff_rxd, out_bytecode]
+    OP_SIZE                           # [k_in, token_in, eff_rxd, out_bytecode, len]
+    <1:08>                            # [k_in, token_in, eff_rxd, out_bytecode, len, 8]
+    OP_SUB                            # [k_in, token_in, eff_rxd, out_bytecode, len-8]
+    OP_SPLIT                          # [k_in, token_in, eff_rxd, code_part, state_part]
+    OP_NIP                            # [k_in, token_in, eff_rxd, state_part]
+    OP_BIN2NUM                        # [k_in, token_in, eff_rxd, token_out]
+    
+    OP_MUL                            # [k_in, token_in, k_out]
+    
+    # --------------------------------------------------------------------------
+    # Step 5: Verify K_out >= K_in
+    # --------------------------------------------------------------------------
+    
+    OP_ROT                            # [token_in, k_out, k_in]
+    OP_DROP                           # [k_out, k_in]
+    OP_SWAP                           # [k_in, k_out]
+    OP_LESSTHANOREQUAL                # [k_in <= k_out] (true if valid trade)
+
+OP_ENDIF
+
+# ==============================================================================
+# STATE SEPARATOR AND STATE DATA
+# ==============================================================================
+# The state portion follows the code and stores mutable pool data.
+# Format: <8:token_amount>
+
+OP_STATESEPARATOR                     # 0xbd - marks end of code portion
+<8:token_amount>                      # Token amount (int64, little-endian)

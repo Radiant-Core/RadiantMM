@@ -1,0 +1,39 @@
+{
+  "name": "radiantmm",
+  "version": "1.0.0",
+  "description": "Constant Product Market Maker (CPMM) protocol for Radiant blockchain",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src tests",
+    "dev": "tsx watch src/index.ts"
+  },
+  "keywords": [
+    "radiant",
+    "blockchain",
+    "amm",
+    "cpmm",
+    "dex",
+    "market-maker"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "eslint": "^8.55.0",
+    "tsx": "^4.6.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.3.2",
+    "@noble/secp256k1": "^2.0.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ]
+}
