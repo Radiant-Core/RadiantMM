@@ -33,7 +33,7 @@
     "@noble/hashes": "^1.3.2",
     "@noble/secp256k1": "^2.0.0",
     "@radiantblockchain/constants": "github:Radiant-Core/radiantblockchain-constants",
-    "@radiant-core/radiantjs": "^2.0.4"
+    "@radiant-core/radiantjs": "^2.0.5"
   },
   "workspaces": [
     "packages/*"
