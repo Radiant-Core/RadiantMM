@@ -61,7 +61,7 @@ Before production use, the following audits are required:
 
 ## Dependencies
 
-- `@radiantblockchain/radiantjs` - Cryptographic operations
+- `@radiant-core/radiantjs` - Cryptographic operations
 - `@radiantblockchain/constants` - Protocol constants
 
 ## Security Checklist for Users
