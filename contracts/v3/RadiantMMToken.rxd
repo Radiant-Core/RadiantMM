@@ -58,8 +58,15 @@ contract RadiantMMToken(
             // rejects the tx. Deployed BARE (no state section) for clean dispatch.
             require(this.activeInputIndex == 1);
 
-            // The genuine pool controller (singleton) must be an input here.
-            requireInputRef($poolRef);
+            // The genuine pool controller (singleton $poolRef) must be co-spent.
+            // Use a RUNTIME refType check, NOT requireInputRef($poolRef): the latter is
+            // OP_REQUIREINPUTREF, which Radiant's ref-induction analysis reads STATICALLY
+            // across both branches of this shared token code — that would force EVERY token
+            // output (incl. an ordinary holder transfer) to carry $poolRef, breaking free
+            // wallet-to-wallet transfers. refType() (OP_REFTYPE_UTXO) is evaluated at runtime
+            // and is invisible to the static scanner, so plain transfers stay unconstrained.
+            // ($poolRef is a singleton => refType == 2 iff the controller is an input.)
+            require(tx.inputs.refType($poolRef) == 2);
 
             pushInputRef($tokenRef);
             bytes32 csh = hash256(tx.inputs[this.activeInputIndex].codeScript);

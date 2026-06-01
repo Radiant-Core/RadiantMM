@@ -215,3 +215,17 @@ code-group → conservation fails). Recommended directions for review:
   regtest and conservation-consistent, but a production builder should omit a 0-token change.
 
 **Fund-safety still requires external audit + testnet soak regardless of regtest results.**
+
+## Transferability defect FIXED (refType gate)
+
+The defect (every `transfer()` required `$poolRef` co-spent) was caused by `release()` using
+`requireInputRef($poolRef)` (`OP_REQUIREINPUTREF`) in the SHARED token code — Radiant's
+ref-induction analysis reads that STATICALLY across both branches, tainting every token output.
+Fix: gate `release()` with the RUNTIME check `tx.inputs.refType($poolRef) == 2`
+(`OP_REFTYPE_UTXO`), which the static scanner ignores. `$poolRef` is a singleton, so refType==2
+iff the controller is co-spent — same security, no static taint.
+
+Validated on regtest after the fix:
+- genesis → buy → sell (SDK) — all still ACCEPTED.
+- **wallet-to-wallet transfer with NO pool co-spent — ACCEPTED** (was rejected before). `tools/regtest/transfer-nopool.cjs`
+- **reserve theft via release() with NO controller — REJECTED** (refType==2 fails). `/tmp/reserve-theft.cjs` (security preserved).
