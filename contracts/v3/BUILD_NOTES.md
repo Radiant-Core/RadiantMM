@@ -67,7 +67,25 @@ The full paired-UTXO CPMM is proven at consensus level:
 | **K-violating drain** (take 20k tokens for 100k RXD) | **REJECTED** | `trade-attack-kviolation.cjs` (false top stack) |
 | **Reserve substitution** (decoy token UTXO as input[1]) | **REJECTED** | `trade-attack-substitution.cjs` (OP_NUMEQUALVERIFY on outpointIndex) |
 
+### Full BUY-side adversarial matrix (`tools/regtest/trade-adversarial.cjs`) — all as expected
+
+| Variant | Expected | Result | Guard that fired |
+|---------|----------|--------|------------------|
+| valid (Tp=90934) | accept | ✅ accepted | — (K_out 100000119800 ≥ K_in 1e11) |
+| fee-underpay (Tp=90933) | reject | ✅ rejected | K (ceiling fee enforced to the satoshi) |
+| k-violation (take 20k) | reject | ✅ rejected | `require(kOut>=kIn)` |
+| code-ctrl (wrong out0 code) | reject | ✅ rejected | C2 continuity `outputs[0].codeScript` |
+| code-reserve (wrong out1 code) | reject | ✅ rejected | C2 continuity `outputs[1].codeScript` |
+| strip-pool (out0 w/o $poolRef) | reject | ✅ rejected | continuity / `refOutputCount($poolRef)==1` |
+| layout (controller at out2) | reject | ✅ rejected | continuity@out0 |
+| dust-rxd (out0 < 546) | reject | ✅ rejected | `require(rxdOut>=546)` |
+| zero-token (out1 = 0) | reject | ✅ rejected | `require(tokOut>0)` |
+| dup-pool (two $poolRef outs) | reject | ✅ rejected | singleton-sibling (ref-operations layer) |
+| reserve-substitution (decoy in[1]) | reject | ✅ rejected | outpoint pairing `OP_NUMEQUALVERIFY` |
+
 C1 (real coloured-satoshi reserves + outpoint-pairing isolation) and C2 (code-only continuity)
-are enforced by consensus. Remaining for the §4 matrix: sell path (spends stateful user tokens —
-needs the state-on-stack dispatch resolved), code-change/ref-strip/fee-rounding/dust/overflow
-cases, then SDK rebuild + external audit before any mainnet use.
+are enforced by consensus on the BUY side. Overflow guard (2^53 bound) is present but not
+exercised at scale (would need ~petaphoton funding).
+
+**Remaining:** SELL path (spends stateful user tokens — needs state-on-stack dispatch resolved;
+being done by a separate agent), then SDK tx-builder rebuild + external audit before mainnet.
