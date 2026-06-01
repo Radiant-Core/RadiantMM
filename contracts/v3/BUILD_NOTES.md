@@ -53,3 +53,21 @@ ref strip, fake sibling, pool not at out0/1, dust, fee rounding, overflow.
 Then: rebuild the SDK tx-builder for the paired model (H3), reconcile artifacts (H4), e2e tests.
 
 **Fund-safety still requires external audit + testnet soak regardless of regtest results.**
+
+## VALIDATED ON REGTEST (v3.0.0 local node) — 2026-06-01
+
+The full paired-UTXO CPMM is proven at consensus level:
+
+| Scenario | Result | Proof |
+|----------|--------|-------|
+| Genesis: mint `$poolRef`+`$tokenRef`, deploy pool bare | ACCEPTED | `genesis.cjs` |
+| Bare covenant spend (controller `withdraw`) | ACCEPTED | `spend-withdraw.cjs` |
+| Reserve spend (`release`) | ACCEPTED | isolation test |
+| **Buy trade** (controller `trade` + reserve `release`, both recreated, K holds) | **ACCEPTED** | `trade-buy.cjs` (R 1e6→1.1e6, T 1e5→90934, K_out≥K_in) |
+| **K-violating drain** (take 20k tokens for 100k RXD) | **REJECTED** | `trade-attack-kviolation.cjs` (false top stack) |
+| **Reserve substitution** (decoy token UTXO as input[1]) | **REJECTED** | `trade-attack-substitution.cjs` (OP_NUMEQUALVERIFY on outpointIndex) |
+
+C1 (real coloured-satoshi reserves + outpoint-pairing isolation) and C2 (code-only continuity)
+are enforced by consensus. Remaining for the §4 matrix: sell path (spends stateful user tokens —
+needs the state-on-stack dispatch resolved), code-change/ref-strip/fee-rounding/dust/overflow
+cases, then SDK rebuild + external audit before any mainnet use.
