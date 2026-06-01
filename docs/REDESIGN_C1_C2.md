@@ -1,100 +1,185 @@
-# Redesign proposal: fixing C1 (unbacked tokens) and C2 (frozen state)
+# Redesign: fixing C1 (unbacked tokens) and C2 (frozen state)
 
-**Status:** DRAFT — design-level. Pending verification of exact Radiant reference-opcode
-semantics on regtest. Do **not** deploy from this document.
+**Status:** design RESOLVED at the consensus level; contract bytecode + tx shape still
+pending regtest validation. Do **not** deploy from this document yet.
 
-This proposal addresses the two critical findings in `SECURITY-AUDIT.md`:
+This addresses the two critical findings in `SECURITY-AUDIT.md`:
 
 - **C1** — token reserves are unbacked integers; no Glyph token is enforced on-chain.
 - **C2** — the continuity check compares the full locking bytecode, freezing the state so
   no swap can occur.
 
-Companion draft: `contracts/RadiantMMPool.v2.draft.rxd`.
+The open question that blocked the previous draft (§3 below) is now answered directly from
+the Radiant-Node consensus interpreter and the canonical Glyph FT contract, rather than left
+for regtest. The answer materially changes the pool architecture — see §0.
+
+Companion draft: `contracts/RadiantMMPool.v2.draft.rxd` (its single-UTXO assumption is
+superseded by §0; treat it as historical).
+
+---
+
+## 0. The finding that changes everything: a Glyph FT *is* coloured RXD
+
+On Radiant, a Glyph fungible token's **amount is the satoshi value (`nValue`) of the
+ref-bearing UTXO**. There is no separate "amount" field — 1 token = 1 photon, coloured by the
+token's 36-byte ref.
+
+Evidence (consensus + canonical contract, not inference):
+
+- **Canonical FT contract** — `Photonic-Wallet/packages/lib/src/script.ts` `ftScript()`:
+  ```
+  P2PKH(owner)
+  OP_STATESEPARATOR
+  OP_PUSHINPUTREF <ref>
+  OP_REFOUTPUTCOUNT_OUTPUTS
+  OP_INPUTINDEX OP_CODESCRIPTBYTECODE_UTXO OP_HASH256 OP_DUP
+  OP_CODESCRIPTHASHVALUESUM_UTXOS   OP_OVER OP_CODESCRIPTHASHVALUESUM_OUTPUTS
+  OP_GREATERTHANOREQUAL OP_VERIFY                 // Σ value(in, this code) ≥ Σ value(out, this code)
+  OP_CODESCRIPTHASHOUTPUTCOUNT_OUTPUTS OP_NUMEQUALVERIFY  // every ref-output uses this exact code
+  ```
+  Conservation is enforced on **summed `nValue`** grouped by code-script-hash. The token
+  quantity carried by a UTXO is therefore exactly its satoshi value.
+- **Canonical transfer** — `Photonic-Wallet/packages/lib/src/transfer.tsx`: a transfer of
+  `value` tokens emits `{ script: toScript, value }` and FT change `{ script: fromScript,
+  value: accum.sum - value }`. Balances are summed satoshi values. (Confirms the above.)
+- **Interpreter** — `Radiant-Node/src/script/interpreter.cpp` + `script_execution_context.h`:
+  `OP_REFVALUESUM_{UTXOS,OUTPUTS}(ref)` returns `Σ nValue / SATOSHI` over inputs/outputs
+  carrying `ref`. `OP_CODESCRIPTHASHVALUESUM_*` does the same grouped by code-script-hash.
+
+### Consequences
+
+1. **A single-UTXO pool is impossible.** If the pool UTXO carries `tokenRef`, its *entire*
+   `nValue` is the token reserve — there is no room for an independent RXD reserve in the same
+   output. RXD reserve and token reserve must live in **separate UTXOs**.
+2. **`token_in` / `token_out` are just `.value`** of the token-reserve input/output — real,
+   consensus-conserved coloured satoshis, not a spender-written state integer. This *is* the
+   C1 fix, and it falls out for free once the reserve is a real ref-bearing UTXO.
+3. **The state/code split is the C2 fix and the custody mechanism.** Radiant does *not* enforce
+   "pre-separator must be pushes only" (`CScript::GetPushRefs` in `script.cpp` only locates the
+   separator; stock `ftScript` itself puts a full P2PKH before the separator). So:
+   - **code** (post-`OP_STATESEPARATOR`) = the ref-conservation logic, byte-identical across
+     every UTXO of the token;
+   - **state** (pre-separator) = the *gate* deciding who may spend (a signature for a user; the
+     **AMM covenant** for a pool-held reserve).
+   Because conservation only hashes the code portion, a pool can custody a *stock* Glyph FT by
+   recreating it with the **same code** and an **AMM gate in the state** — `m == n` still holds,
+   so the token's own contract accepts the move.
 
 ---
 
 ## 1. The security property we need
 
-A pool UTXO holds two assets:
-
-1. **RXD** — the UTXO's native satoshi value (`rxd`).
-2. **A specific Glyph fungible token** — identified by `tokenRef`, with quantity `token`.
-
 The constant-product invariant `(rxd_out − fee) · token_out ≥ rxd_in · token_in` is only
-meaningful if **`token_in` and `token_out` are the real token quantities carried by the
-pool's own input and continuing output** — not numbers the spender writes into free-form
-state. That single property is the whole fix for C1.
+meaningful if `token_in`/`token_out` are the **real token quantities carried by the pool's own
+reserve UTXOs**. Per §0 those quantities are the reserve UTXO's `nValue`, conserved at
+consensus — so the spender cannot fabricate them. That single fact is the whole fix for C1.
 
-The current contract derives `token_*` from the state integer, which the spender controls,
-so it can be fabricated. The redesign must derive `token_*` from the actual on-chain token
-amount, which Radiant's reference system conserves at consensus.
-
-## 2. Two changes
+## 2. The two changes
 
 ### 2.1 Code-only continuity (fixes C2)
 
-Replace the full-bytecode comparison with a comparison of the **code portion only**, so the
-state (and the token quantity) is allowed to change while the logic is immutable:
+Replace the full-bytecode comparison with a **code-portion** comparison so state (gate/owner)
+may change while logic stays immutable:
 
-- Split each locking bytecode at the state separator and compare the code halves; or
-- Use the active-/code-bytecode introspection that already excludes the state portion.
+```
+OP_INPUTINDEX OP_CODESCRIPTBYTECODE_UTXO   // this input's code
+<poolOutIdx> OP_CODESCRIPTBYTECODE_OUTPUT  // recreated pool output's code
+OP_EQUALVERIFY
+```
 
-The pool's `tokenRef` must also be carried unchanged on the continuing output (ref
-continuity), so the pool can never silently change which token it trades.
+`OP_CODESCRIPTBYTECODE_{UTXO,OUTPUT}` return exactly the bytes from `OP_STATESEPARATOR` to the
+end (see interpreter §2281–2327), so this is a direct, no-arithmetic split.
 
 ### 2.2 Real token binding (fixes C1)
 
-- Require `tokenRef` to be present on the pool input (`OP_REQUIREINPUTREF`-style assertion)
-  and propagated to the continuing pool output.
-- Compute `token_in` / `token_out` from the **token amount carried by the pool's own
-  input/output**, not from the state field.
+- The token-reserve UTXO carries `tokenRef` (`OP_PUSHINPUTREF`/`OP_REQUIREINPUTREF`) and is
+  recreated carrying the same ref (ref continuity).
+- `token_in = value(tokenReserveInput)`, `token_out = value(tokenReserveOutput)`.
+- A **buy** (trader adds RXD, takes tokens) forces `token_out < token_in`; the difference must
+  land in the trader's token output (Glyph conservation guarantees it physically exists).
+- A **sell** forces `token_out > token_in`; the trader must supply real token inputs.
 
-Radiant conserves a ref's total token value across a transaction's inputs and outputs, so:
-- a **buy** (trader adds RXD, removes tokens) forces `token_out < token_in`, with the
-  difference necessarily landing in the trader's output;
-- a **sell** (trader adds tokens, removes RXD) forces `token_out > token_in`, and the trader
-  must actually supply those tokens as a real input.
+## 3. RESOLVED — per-output amount read
 
-The trader cannot fabricate `token_out`, because it reflects tokens that consensus requires
-to physically exist and be conserved.
+> *Previous open question: how to read the token amount of one specific output, vs the tx-wide
+> sum?*
 
-## 3. Open question to resolve on regtest (do this first)
+**Answer:** you don't need a per-ref-per-index amount opcode. Because token amount = `nValue`
+(§0), the per-output amount is simply `tx.outputs[i].value` / `tx.inputs[i].value`. The role of
+the ref opcodes is only to **prove** that value is genuinely coloured `tokenRef` (and bound to
+the FT conservation code), not to compute it.
 
-**How do we read the token amount carried by *one specific* output/UTXO — the pool's — as
-opposed to the global sum across the whole transaction?**
+The reads the final contract uses, all confirmed present in Radiant-Node:
 
-- A global `REFVALUESUM_*` over all inputs is wrong for the **sell** path: the seller also
-  holds the token on the input side, so a global sum would over-count `token_in`.
-- We need a **per-index** read of the pool input (`this.activeInputIndex`) and the continuing
-  output (same index), restricted to `tokenRef`.
+| Need | Opcode | Returns |
+|------|--------|---------|
+| code-only continuity | `OP_CODESCRIPTBYTECODE_UTXO/_OUTPUT` | bytes after `OP_STATESEPARATOR` |
+| token-reserve amount | `tx.inputs[i].value` / `tx.outputs[i].value` | coloured satoshis = token qty |
+| ref present on an output | `OP_REFDATASUMMARY_OUTPUT(i)` | concat of refs on output `i` |
+| ref type (normal/singleton) | `OP_REFTYPE_OUTPUT(ref)` | 0 none / 1 normal / 2 singleton |
+| tx-wide token conservation | `OP_REFVALUESUM_UTXOS/_OUTPUTS(ref)` | Σ coloured satoshis |
 
-Resolve which of these Radiant actually provides before writing final bytecode:
-1. A per-output / per-utxo ref-value introspection opcode (preferred — read it directly).
-2. If only transaction-wide sums exist: constrain the tx shape (e.g. the pool is the only
-   ref holder on a given side, or the trader's token in/out is a separate enforced ref), and
-   derive the pool quantity by subtraction — each added constraint is an attack surface and
-   must be tested adversarially.
+The previous worry about a global `REFVALUESUM` over-counting the sell-side token-in dissolves:
+the pool reads its *own* reserve UTXO's `.value` by index, and uses tx-wide sums only as a
+conservation cross-check if desired.
 
-The draft contract marks these reads as `poolTokenIn()` / `poolTokenOut()` precisely because
-the opcode-level implementation depends on this answer.
+## 3.5 Architecture: a paired-UTXO pool
 
-## 4. Regtest test plan (must pass before any deployment)
+A pool is **two co-spent UTXOs**, recreated together every trade:
+
+- **RXD reserve** `R` — plain satoshis, locked by the pool code `P_rxd`.
+- **Token reserve** `T` — coloured `tokenRef`; `value == T == token reserve`. Locked by an
+  FT whose **code = stock Glyph conservation code** (so it stays the same token) and whose
+  **state = AMM gate** `P_ft` (so only a valid trade can move it).
+
+Both reserve scripts introspect *the other* reserve's matching input/output by index, so each
+side can enforce the **joint** invariant `R' · T' ≥ R · T` (after fee) even though each UTXO
+runs only its own script. Trade tx shape:
+
+```
+inputs:  [pool RXD reserve R] [pool token reserve T] [trader funding / trader tokens]
+outputs: [pool RXD reserve R'] [pool token reserve T'] [trader tokens / trader RXD] [change]
+```
+
+Open design sub-points to settle on regtest (engineering, not feasibility):
+
+1. **Cross-UTXO binding** — how each reserve identifies its sibling (fixed relative indices vs a
+   singleton "pool id" ref carried by both reserves; a singleton via `OP_PUSHINPUTREFSINGLETON`
+   is the robust choice — it prevents a second forged reserve from impersonating the pool).
+2. **Stack discipline** of state-gate-then-conservation-code when custodying a stock FT (the
+   gate must leave the stack exactly as the conservation code expects).
+3. **Fee + rounding** placement so it cannot be gamed across the two outputs.
+
+### Hard constraint to flag
+
+The stock Glyph FT permanently binds its token to its own code script
+(`OP_CODESCRIPTHASHOUTPUTCOUNT_OUTPUTS OP_NUMEQUALVERIFY` requires *every* ref-output to use it).
+Custody is therefore only possible by keeping that **exact code** and varying only the state
+gate (§0.3). If a future Glyph version changes the FT code, the pool's token-reserve code must
+track it. A pool cannot hold a token under arbitrary alternative code.
+
+## 4. Regtest test plan (must pass before leaving DRAFT)
 
 Positive:
-1. Buy: trader adds RXD, receives the correct token delta, K holds → accepted.
-2. Sell: trader supplies tokens, receives RXD, K holds → accepted.
+1. Buy: trader adds RXD, receives correct token delta, K holds → accepted.
+2. Sell: trader supplies real `tokenRef` tokens, receives RXD, K holds → accepted.
 3. Owner withdrawal with valid sig → accepted.
+4. Round-trip: a token can move user→pool→user and is still recognised as the same FT by the
+   indexer (code-hash unchanged).
 
 Adversarial (all must be **rejected**):
-4. **C1 drain:** set pool output RXD far below input and write a huge `token_out` without
-   moving any real tokens → must fail (this is the current contract's fatal case).
-5. Buy/sell that decreases K by 1 → must fail.
-6. Trade that changes the code portion → must fail.
-7. Trade that changes/strips `tokenRef` on the output → must fail.
-8. Trade that does not recreate the pool at the expected output index → must fail.
-9. Zero / dust token or RXD reserves on the output → must fail (no division/own-goal states).
-10. Fee rounding: smallest non-zero delta still charges a non-zero fee (ceiling division).
-11. Overflow: reserves near the int limit behave per the node's actual script-number
-    semantics (verify whether `OP_MUL` overflows or uses big-int math on the target node).
+5. **C1 drain:** lower the token-reserve output `value` (or strip the ref) without delivering
+   the tokens to the trader → fail.
+6. Buy/sell that decreases K by 1 → fail.
+7. Trade that changes the code portion of either reserve → fail.
+8. Trade that changes/strips `tokenRef` (or the pool-id singleton) on a reserve output → fail.
+9. Fake sibling: forge a second token-reserve to spoof the joint check → fail (singleton blocks
+   the duplicate ref).
+10. Pool not recreated at the expected output indices → fail.
+11. Zero/dust reserve on either output → fail.
+12. Fee rounding: smallest non-zero delta still charges a non-zero (ceiling) fee.
+13. Overflow: reserves near the int limit behave per the node's actual script-number semantics
+    (verify whether `OP_MUL` overflows or uses big-int math on the target node).
 
-Only once 1–11 behave correctly on regtest should this leave DRAFT status.
+Only once 1–13 behave correctly on regtest should this leave DRAFT and a `v3` contract replace
+the superseded single-UTXO `v2.draft`.

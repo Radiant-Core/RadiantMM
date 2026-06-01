@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: MIT
 //
 // ============================================================================
-// DRAFT — NOT FOR DEPLOYMENT.
+// DRAFT — NOT FOR DEPLOYMENT.  *** SINGLE-UTXO MODEL SUPERSEDED ***
+//
+// This file's core assumption — one pool UTXO holding both an RXD reserve and a
+// token amount — is INVALID on Radiant. A Glyph FT amount IS the satoshi value
+// of the coloured UTXO (1 token = 1 photon; see docs/REDESIGN_C1_C2.md §0), so a
+// single UTXO cannot hold independent RXD and token reserves. The corrected
+// design is a PAIRED-UTXO pool (RXD reserve + token reserve co-spent); see
+// docs/REDESIGN_C1_C2.md §3.5. Keep this file only as historical context.
 //
 // This is a design-level sketch addressing the two critical findings in
 // ../SECURITY-AUDIT.md and ../docs/REDESIGN_C1_C2.md:
