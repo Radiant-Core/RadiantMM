@@ -215,13 +215,15 @@ export class TradeBuilder {
       scriptPubKey: params.receiver
     });
 
-    // Calculate and add change output
+    // Calculate and add change output.
+    // The sell proceeds are released by the pool output and paid to the receiver
+    // output above; they must NOT also be added back into the funding-derived
+    // change (doing so double-counted them and produced an over-spending tx).
     const totalInputValue = this.fundingUtxos.reduce((sum, u) => sum + u.value, 0n);
     const usedForTrade = params.direction === 'buy' ? route.totalAmountIn : 0n;
-    const receivedFromTrade = params.direction === 'sell' ? route.totalAmountOut : 0n;
     const minerFee = 1000n; // Estimate, should be calculated based on tx size
 
-    const changeAmount = totalInputValue - usedForTrade + receivedFromTrade - minerFee;
+    const changeAmount = totalInputValue - usedForTrade - minerFee;
 
     if (changeAmount > 546n) {
       outputs.push({

@@ -129,24 +129,52 @@ describe('TradeBuilder', () => {
       const builder = new TradeBuilder();
       const pool = createMockPool(10000n, 1000n);
       const funding = createMockFunding(5000n);
-      
+
       builder.addPool(pool).addFunding(funding);
-      
+
       const params: SwapParams = {
         direction: 'buy',
         amountIn: 1000n,
         minAmountOut: 1n,
         receiver
       };
-      
+
       const route = builder.calculateRoute(params);
       const { inputs, outputs } = builder.buildTradeTransaction(route, params);
-      
+
       // Should have pool + funding inputs
       expect(inputs.length).toBe(2);
-      
+
       // Should have pool output + receiver + possibly change
       expect(outputs.length).toBeGreaterThanOrEqual(2);
+    });
+
+    // Regression for H2: the sell path previously added the proceeds to change
+    // AND paid them to the receiver, so outputs exceeded inputs (over-spend).
+    it('sell transaction outputs must not exceed inputs', () => {
+      const builder = new TradeBuilder();
+      const pool = createMockPool(100000n, 10000n);
+      const funding = createMockFunding(5000n);
+
+      builder.addPool(pool).addFunding(funding);
+
+      const params: SwapParams = {
+        direction: 'sell',
+        amountIn: 500n,
+        minAmountOut: 1n,
+        receiver
+      };
+
+      const route = builder.calculateRoute(params);
+      const { inputs, outputs } = builder.buildTradeTransaction(route, params);
+
+      const inSum = inputs.reduce((s, i) => s + i.value, 0n);
+      const outSum = outputs.reduce((s, o) => s + o.value, 0n);
+      const minerFee = 1000n;
+
+      // The difference is exactly the implied miner fee — never negative.
+      expect(outSum).toBeLessThanOrEqual(inSum);
+      expect(inSum - outSum).toBe(minerFee);
     });
   });
 });

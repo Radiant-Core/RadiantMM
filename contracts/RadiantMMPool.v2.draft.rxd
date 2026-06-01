@@ -1,0 +1,105 @@
+// RadiantMM Micro-Pool Contract v2 — DRAFT (design proposal)
+// SPDX-License-Identifier: MIT
+//
+// ============================================================================
+// DRAFT — NOT FOR DEPLOYMENT.
+//
+// This is a design-level sketch addressing the two critical findings in
+// ../SECURITY-AUDIT.md and ../docs/REDESIGN_C1_C2.md:
+//   C1 — token reserves were unbacked integers (no Glyph token enforced).
+//   C2 — full-bytecode continuity froze the state so no swap could occur.
+//
+// The reference-opcode reads are expressed as named intrinsics
+// (requireTokenRef / poolTokenIn / poolTokenOut / codeOf / tokenRefOf) because
+// their exact opcode-level implementation depends on an open question that must
+// be resolved on regtest first: how to read the token amount carried by ONE
+// specific input/output (the pool's), not the transaction-wide sum. See
+// docs/REDESIGN_C1_C2.md §3. Do not treat this file as final bytecode.
+// ============================================================================
+
+pragma radiant ^1.0.0;
+
+contract RadiantMMPool(
+    bytes20 ownerPkh,      // Owner's public key hash (for withdrawals)
+    bytes32 tokenRef       // Glyph token reference identifier (NOW ENFORCED)
+) {
+    int constant FEE_NUMERATOR = 3;
+    int constant FEE_DENOMINATOR = 1000;
+    int constant MAX_INT64 = 9223372036854775807; // 2^63 - 1
+    int constant DUST = 546;
+
+    /**
+     * Path 1: Withdrawal (Owner Only) — unchanged from v1.
+     */
+    function withdraw(pubkey pk, sig s) {
+        require(hash160(pk) == ownerPkh);
+        require(checkSig(s, pk));
+    }
+
+    /**
+     * Path 2: Trade (Anyone)
+     */
+    function trade() {
+        int i = this.activeInputIndex;
+
+        // --- C2 fix: CODE-ONLY continuity --------------------------------
+        // Compare only the code portion (before the state separator), so the
+        // state/token quantity may change while the logic stays immutable.
+        require(codeOf(tx.outputs[i].lockingBytecode)
+             == codeOf(tx.inputs[i].lockingBytecode));
+
+        // --- C1 fix part 1: the pool must trade THIS token, in and out ----
+        require(requireTokenRef(tx.inputs[i],  tokenRef));
+        require(requireTokenRef(tx.outputs[i], tokenRef));
+        require(tokenRefOf(tx.outputs[i]) == tokenRef); // ref continuity
+
+        // RXD (native value) before/after.
+        int rxdIn  = tx.inputs[i].value;
+        int rxdOut = tx.outputs[i].value;
+
+        // --- C1 fix part 2: token amounts come from REAL on-chain tokens --
+        // poolTokenIn/Out read the token quantity carried by the pool's own
+        // input/output for `tokenRef` (NOT the spender-written state, and NOT
+        // a tx-wide sum). See docs/REDESIGN_C1_C2.md §3 for the exact read.
+        int tokenIn  = poolTokenIn(i, tokenRef);
+        int tokenOut = poolTokenOut(i, tokenRef);
+
+        // Reject degenerate reserves (no zero/dust own-goal states).
+        require(rxdIn  >= DUST && rxdOut >= DUST);
+        require(tokenIn > 0 && tokenOut > 0);
+
+        // Overflow guard on K_in.
+        require(rxdIn <= MAX_INT64 / tokenIn);
+        int kInput = rxdIn * tokenIn;
+
+        // Fee: ceiling division so it is never 0 for any non-zero delta.
+        int rxdDelta = abs(rxdOut - rxdIn);
+        int fee = (rxdDelta * FEE_NUMERATOR + (FEE_DENOMINATOR - 1)) / FEE_DENOMINATOR;
+
+        int effectiveRxdOut = rxdOut - fee;
+        require(effectiveRxdOut > 0);
+
+        // Overflow guard on K_out.
+        require(effectiveRxdOut <= MAX_INT64 / tokenOut);
+        int kOutput = effectiveRxdOut * tokenOut;
+
+        // Constant-product invariant.
+        require(kOutput >= kInput);
+    }
+
+    function abs(int n) -> int {
+        return n < 0 ? -n : n;
+    }
+
+    // ------------------------------------------------------------------------
+    // Intrinsics to be lowered to Radiant reference/introspection opcodes once
+    // the per-index token-amount read is confirmed on regtest. Declared here to
+    // make the security-relevant reads explicit and reviewable.
+    //
+    //   codeOf(bytecode)        -> code portion before the state separator
+    //   tokenRefOf(out/in)      -> the Glyph ref carried by that output/input
+    //   requireTokenRef(io,ref) -> assert `ref` is present on that input/output
+    //   poolTokenIn(i,ref)      -> token amount carried by input  i for `ref`
+    //   poolTokenOut(i,ref)     -> token amount carried by output i for `ref`
+    // ------------------------------------------------------------------------
+}

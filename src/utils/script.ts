@@ -104,30 +104,39 @@ export function encodeState(tokenAmount: bigint): Buffer {
 }
 
 /**
+ * Locate the state separator by fixed length.
+ *
+ * The state portion is always the final STATE_SIZE bytes, exactly as the
+ * on-chain script reads it (`OP_SIZE 8 OP_SUB OP_SPLIT OP_NIP`). We must NOT
+ * scan for the separator byte (0xbd): it is also a legal data byte inside the
+ * little-endian token amount, so `lastIndexOf` can land inside the state and
+ * misparse the pool (e.g. token amount 189 = 0xbd ...). Locating by length
+ * keeps the SDK consistent with consensus.
+ */
+function stateSeparatorIndex(script: Buffer): number {
+  const separatorIndex = script.length - CONTRACT_CONFIG.STATE_SIZE - 1;
+  if (separatorIndex < 0) {
+    throw new RadiantMMError(
+      ErrorCodes.INVALID_SCRIPT,
+      `Script too small to contain state: ${script.length} bytes`
+    );
+  }
+  if (script[separatorIndex] !== OP.OP_STATESEPARATOR) {
+    throw new RadiantMMError(
+      ErrorCodes.INVALID_SCRIPT,
+      'State separator not found at expected position'
+    );
+  }
+  return separatorIndex;
+}
+
+/**
  * Decode pool state from script
  */
 export function decodeState(script: Buffer): DecodedState {
-  // State is the last 8 bytes after OP_STATESEPARATOR
-  const separatorIndex = script.lastIndexOf(OP.OP_STATESEPARATOR);
-  
-  if (separatorIndex === -1) {
-    throw new RadiantMMError(
-      ErrorCodes.INVALID_SCRIPT,
-      'No state separator found in script'
-    );
-  }
-  
+  const separatorIndex = stateSeparatorIndex(script);
   const stateData = script.subarray(separatorIndex + 1);
-  
-  if (stateData.length < CONTRACT_CONFIG.STATE_SIZE) {
-    throw new RadiantMMError(
-      ErrorCodes.INVALID_STATE,
-      `State too small: ${stateData.length} bytes`
-    );
-  }
-  
-  const tokenAmount = decodeTokenAmount(stateData.subarray(0, 8));
-  
+  const tokenAmount = decodeTokenAmount(stateData.subarray(0, CONTRACT_CONFIG.STATE_SIZE));
   return { tokenAmount };
 }
 
@@ -237,15 +246,8 @@ function buildCodePortion(ownerPkh: Buffer): Buffer {
  * Parse pool script to extract components
  */
 export function parsePoolScript(script: Buffer): DecodedScript {
-  const separatorIndex = script.lastIndexOf(OP.OP_STATESEPARATOR);
-  
-  if (separatorIndex === -1) {
-    throw new RadiantMMError(
-      ErrorCodes.INVALID_SCRIPT,
-      'No state separator found'
-    );
-  }
-  
+  const separatorIndex = stateSeparatorIndex(script);
+
   const codePortion = script.subarray(0, separatorIndex);
   const statePortion = script.subarray(separatorIndex + 1);
   
@@ -342,14 +344,9 @@ export function pushNumber(n: bigint): Buffer {
  * Update state portion of a script (for creating output script)
  */
 export function updateScriptState(script: Buffer, newTokenAmount: bigint): Buffer {
-  const separatorIndex = script.lastIndexOf(OP.OP_STATESEPARATOR);
-  
-  if (separatorIndex === -1) {
-    throw new RadiantMMError(ErrorCodes.INVALID_SCRIPT, 'No state separator');
-  }
-  
+  const separatorIndex = stateSeparatorIndex(script);
   const codePortion = script.subarray(0, separatorIndex + 1); // Include separator
   const newState = encodeState(newTokenAmount);
-  
+
   return Buffer.concat([codePortion, newState]);
 }
