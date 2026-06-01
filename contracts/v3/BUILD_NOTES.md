@@ -17,6 +17,12 @@ Status of the v3 paired-UTXO CPMM (`RadiantMMToken.rxd` + `RadiantMMPool.rxd`).
 - **Regtest** node available locally: `Radiant-Core/build/src/radiantd` (v3.0.0), all ref
   opcodes active by height ~115 (ER@100, PushTXState@110). Run isolated:
   `radiantd -datadir=/tmp/rmm-regtest -listen=0 -rpcport=18443 -daemon`.
+- **Tx pipeline PROVEN on regtest:** `@radiant-core/radiantjs` (exports `Transaction`,
+  `PrivateKey`, `Script`, `Networks.regtest`, `Transaction.Sighash`, and a full `Glyph`
+  ref/token module) builds + signs a tx that the node accepts and mines. Confirmed the
+  Radiant min-relay floor empirically: ~10,000 photons/byte (a ~226-byte tx needs ~2.3M sat
+  fee; 5,000 sat was rejected `min relay fee not met`). This is the foundation for building
+  the genesis + paired-covenant trade txs. See `tools/regtest/`.
 
 ## Key deployment constraints discovered (for the regtest harness)
 1. **BARE scripts, not P2SH.** cashscript's `contract.address` is P2SH (`OP_HASH160 <h>
