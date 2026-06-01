@@ -51,9 +51,12 @@ contract RadiantMMToken(
         // path only enforces supply conservation + escape prevention, and that
         // the UTXO is genuinely a pool reserve (state == POOL_MARKER).
         release() {
-            // This UTXO must be a pool reserve, not a holder UTXO.
-            bytes20 marker = bytes20(tx.inputs[this.activeInputIndex].stateScript.split(1)[1]);
-            require(marker == 0x0000000000000000000000000000000000000000);
+            // The pool reserve is always input index 1 of a trade (canonical
+            // template). The controller's outpoint pairing binds input[1] to the
+            // genuine reserve, so a holder UTXO can never be spent on this path:
+            // if placed at input[1] its outpoint won't match and the controller
+            // rejects the tx. Deployed BARE (no state section) for clean dispatch.
+            require(this.activeInputIndex == 1);
 
             // The genuine pool controller (singleton) must be an input here.
             requireInputRef($poolRef);

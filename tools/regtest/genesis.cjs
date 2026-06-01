@@ -74,9 +74,8 @@ const poolCode = buildCode(poolArt.asm, subs);
 console.log('controller code bytes:', poolCode.length, ' token code bytes:', tokenCode.length);
 
 // --- build bare locking scripts ---
-const MARKER = Buffer.alloc(20, 0);
-const reserveLock = Buffer.from(rs.buildStatefulOutput(MARKER, tokenCode));        // out1
-const userLock = Buffer.from(rs.buildStatefulOutput(userPkh, tokenCode));          // out2
+const reserveLock = tokenCode;                                                    // out1 (BARE, no state)
+const userLock = Buffer.from(rs.buildStatefulOutput(userPkh, tokenCode));          // out2 (stateful holder)
 const controllerLock = poolCode;                                                  // out0 (bare, no state)
 
 // reserve values

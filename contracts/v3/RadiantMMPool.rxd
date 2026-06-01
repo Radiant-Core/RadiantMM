@@ -56,10 +56,9 @@ contract RadiantMMPool(
             // Singleton pool id preserved on exactly one output (the recreated controller).
             require(tx.outputs.refOutputCount($poolRef) == 1);
 
-            // The token reserve (in/out) must be the POOL_MARKER state, not a holder UTXO.
-            // State layout: 0x14 <20 bytes>. Marker = 20 zero bytes.
-            require(tx.inputs[1].stateScript  == 0x140000000000000000000000000000000000000000);
-            require(tx.outputs[1].stateScript == 0x140000000000000000000000000000000000000000);
+            // The token reserve is deployed BARE (no state section) so it
+            // dispatches cleanly; its identity is fixed by the outpoint pairing
+            // above (input[1] co-created with this controller at vout 1).
 
             // The recreated reserve must still carry the traded token.
             require(tx.outputs.refOutputCount($tokenRef) >= 1);
