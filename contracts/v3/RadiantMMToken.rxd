@@ -1,0 +1,87 @@
+pragma radiantscript ^1.1.0;
+
+// RadiantMMToken — AMM-native fungible token (v3)
+// SPDX-License-Identifier: MIT
+//
+// A Glyph-style fungible token (amount = satoshi value of the ref-bearing UTXO,
+// see ../../docs/REDESIGN_C1_C2.md §0) with TWO spend roles distinguished by the
+// UTXO's state section, both sharing ONE code script so the token's supply is
+// conserved across every movement:
+//
+//   * Holder UTXO:  state = <20-byte holderPkh>.  Spent via transfer()/burn()
+//     with the holder's signature — exactly like the stock FungibleToken.
+//
+//   * Pool reserve UTXO: state = <20-byte POOL_MARKER>.  Spent via release()
+//     WITHOUT a signature, but ONLY when the genuine pool controller (its
+//     singleton $poolRef) is co-spent in the same transaction. The controller
+//     enforces the constant-product invariant, so reserve tokens can only move
+//     as part of a priced trade.
+//
+// Theft safety: release() requires state == POOL_MARKER, and no real key hashes
+// to POOL_MARKER, so a holder UTXO (state = real pkh) can never be dragged onto
+// the release() path. A reserve UTXO cannot use transfer() because checkSig
+// against POOL_MARKER is unsatisfiable.
+//
+// Conservation (all paths): every output carrying $tokenRef must use THIS code
+// script, and the summed token value out must equal in (or in - burnAmount).
+
+contract RadiantMMToken(
+    bytes36 constant $tokenRef,   // unique token reference (txid:vout)
+    bytes36 constant $poolRef     // singleton ref of the pool controller
+) {
+    return {
+        // Standard holder-to-holder transfer (signature gated).
+        transfer(pubkey senderPk, sig s) {
+            require(checkSig(s, senderPk));
+
+            bytes20 embeddedPkh = bytes20(tx.inputs[this.activeInputIndex].stateScript.split(1)[1]);
+            require(hash160(senderPk) == embeddedPkh);
+
+            pushInputRef($tokenRef);
+            bytes32 csh = hash256(tx.inputs[this.activeInputIndex].codeScript);
+
+            // Every $tokenRef output must use this code (token cannot escape),
+            // and total token value is conserved.
+            require(tx.outputs.codeScriptCount(csh) == tx.outputs.refOutputCount($tokenRef));
+            require(tx.inputs.codeScriptValueSum(csh) == tx.outputs.codeScriptValueSum(csh));
+        },
+
+        // Pool reserve release (no signature). Authorised solely by the genuine
+        // pool controller being co-spent. The controller enforces pricing; this
+        // path only enforces supply conservation + escape prevention, and that
+        // the UTXO is genuinely a pool reserve (state == POOL_MARKER).
+        release() {
+            // This UTXO must be a pool reserve, not a holder UTXO.
+            bytes20 marker = bytes20(tx.inputs[this.activeInputIndex].stateScript.split(1)[1]);
+            require(marker == 0x0000000000000000000000000000000000000000);
+
+            // The genuine pool controller (singleton) must be an input here.
+            requireInputRef($poolRef);
+
+            pushInputRef($tokenRef);
+            bytes32 csh = hash256(tx.inputs[this.activeInputIndex].codeScript);
+
+            // Same escape-prevention + conservation as transfer().
+            require(tx.outputs.codeScriptCount(csh) == tx.outputs.refOutputCount($tokenRef));
+            require(tx.inputs.codeScriptValueSum(csh) == tx.outputs.codeScriptValueSum(csh));
+        },
+
+        // Burn (signature gated) — reduce supply by exactly burnAmount.
+        burn(pubkey senderPk, sig s, int burnAmount) {
+            require(checkSig(s, senderPk));
+
+            bytes20 embeddedPkh = bytes20(tx.inputs[this.activeInputIndex].stateScript.split(1)[1]);
+            require(hash160(senderPk) == embeddedPkh);
+
+            pushInputRef($tokenRef);
+            bytes32 csh = hash256(tx.inputs[this.activeInputIndex].codeScript);
+            require(tx.outputs.codeScriptCount(csh) == tx.outputs.refOutputCount($tokenRef));
+
+            int inTok = tx.inputs.codeScriptValueSum(csh);
+            int outTok = tx.outputs.codeScriptValueSum(csh);
+            require(burnAmount > 0);
+            require(burnAmount <= inTok);
+            require(inTok - burnAmount == outTok);
+        }
+    }
+}

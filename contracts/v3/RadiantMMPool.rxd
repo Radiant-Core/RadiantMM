@@ -1,0 +1,93 @@
+pragma radiantscript ^1.1.0;
+
+// RadiantMMPool — paired-UTXO CPMM controller (v3)
+// SPDX-License-Identifier: MIT
+//
+// See ../../docs/REDESIGN_C1_C2.md. The pool is TWO co-spent UTXOs:
+//   input[0]/output[0] = RXD reserve   (THIS contract; value = R; carries singleton $poolRef)
+//   input[1]/output[1] = token reserve (RadiantMMToken; value = T = real coloured tokens)
+//
+// C2 fix: code-only continuity via tx.outputs[i].codeScript == tx.inputs[i].codeScript,
+//         so the immutable logic is preserved while value/state may change.
+// C1 fix: token_in / token_out are the REAL coloured-satoshi values of the token-reserve
+//         input/output (tx.inputs[1].value / tx.outputs[1].value) — consensus-conserved by
+//         RadiantMMToken — not a spender-written state integer.
+//
+// !!! SECURITY — RESERVE ISOLATION (must be settled on regtest before mainnet) !!!
+// Radiant has no "value of ref X in output i" opcode (see TokenSwap.rxd audit note).
+// On a BUY, both the recreated reserve (output[1]) and the trader's received tokens carry
+// $tokenRef, so tx-wide refValueSum cannot by itself prove output[1] holds the FULL new
+// reserve. This draft pins the reserve to output[1] by a fixed template + POOL_MARKER state.
+// The robust hardening (carry a singleton $reserveRef on the reserve UTXO's STATE so exactly
+// one output can be the reserve) is the key open item; see REDESIGN §3.5(1).
+
+contract RadiantMMPool(
+    bytes36 constant $poolRef,    // singleton pool identity (carried by THIS reserve)
+    bytes36 constant $tokenRef,   // the traded token's reference
+    bytes20 ownerPkh              // owner (withdraw path)
+) {
+    return {
+        // Anyone may trade RXD <-> token while K = R*T does not decrease (after fee).
+        trade() {
+            // Maintain the singleton pool identity on this controller.
+            pushInputRefSingleton($poolRef);
+
+            // Canonical template: controller is input 0, token reserve is input 1.
+            require(this.activeInputIndex == 0);
+            require(tx.inputs.length >= 2);
+            require(tx.outputs.length >= 2);
+
+            // --- C2: code-only continuity for BOTH pool UTXOs ---------------------
+            require(tx.outputs[0].codeScript == tx.inputs[0].codeScript);  // controller
+            require(tx.outputs[1].codeScript == tx.inputs[1].codeScript);  // token reserve
+
+            // Singleton pool id preserved on exactly one output (the recreated controller).
+            require(tx.outputs.refOutputCount($poolRef) == 1);
+
+            // The token reserve (in/out) must be the POOL_MARKER state, not a holder UTXO.
+            // State layout: 0x14 <20 bytes>. Marker = 20 zero bytes.
+            require(tx.inputs[1].stateScript  == 0x140000000000000000000000000000000000000000);
+            require(tx.outputs[1].stateScript == 0x140000000000000000000000000000000000000000);
+
+            // The recreated reserve must still carry the traded token.
+            require(tx.outputs.refOutputCount($tokenRef) >= 1);
+
+            // --- C1: reserves are REAL on-chain values ----------------------------
+            int rxdIn  = tx.inputs[0].value;
+            int rxdOut = tx.outputs[0].value;
+            int tokIn  = tx.inputs[1].value;
+            int tokOut = tx.outputs[1].value;
+
+            // Reject degenerate reserves.
+            require(rxdIn  >= 546);
+            require(rxdOut >= 546);
+            require(tokIn  > 0);
+            require(tokOut > 0);
+
+            // K before (overflow-guarded). MAX_INT64 = 2^63 - 1.
+            require(rxdIn <= 9223372036854775807 / tokIn);
+            int kIn = rxdIn * tokIn;
+
+            // Fee: 0.3% on the RXD delta, ceiling division (never 0 for a non-zero delta).
+            int rxdDelta = rxdOut - rxdIn;
+            if (rxdDelta < 0) {
+                rxdDelta = 0 - rxdDelta;
+            }
+            int fee = (rxdDelta * 3 + 999) / 1000;
+
+            int effRxdOut = rxdOut - fee;
+            require(effRxdOut > 0);
+
+            // K after (overflow-guarded) must not decrease.
+            require(effRxdOut <= 9223372036854775807 / tokOut);
+            int kOut = effRxdOut * tokOut;
+            require(kOut >= kIn);
+        },
+
+        // Owner withdrawal / liquidity management.
+        withdraw(pubkey pk, sig s) {
+            require(hash160(pk) == ownerPkh);
+            require(checkSig(s, pk));
+        }
+    }
+}
