@@ -89,3 +89,18 @@ exercised at scale (would need ~petaphoton funding).
 
 **Remaining:** SELL path (spends stateful user tokens — needs state-on-stack dispatch resolved;
 being done by a separate agent), then SDK tx-builder rebuild + external audit before mainnet.
+
+## SDK rebuilt for the paired model (task #7)
+
+`src/v3/` is the paired-UTXO SDK (legacy single-UTXO `src/*.ts` kept only for its math/
+encoding tests; not deployable). Exported as `v3` from the package root.
+- `v3/math.ts` — CPMM math kept BYTE-CONSISTENT with the on-chain `trade()` (ceiling fee,
+  `verifyAccept` = exact contract criterion). `quoteBuy(1e6,1e5,1e5)` ⇒ fee 300, reserveOut
+  90934, out 9066 — the validated on-chain numbers; 90933 is rejected. 7 unit tests.
+- `v3/contracts.ts` — bare ref-script building via radiantjs `Script.fromASM` substitution
+  (cashscript's serializer mis-encodes ref operands), ref encoding, inline `buildStatefulOutput`.
+- `v3/builder.ts` — `buildGenesis` + `buildBuy` (proven on-chain), `quoteSell` (controller side
+  symmetric; trader stateful-token spend pending the sell-path work).
+- Integration: `tools/regtest/sdk-smoke.mts` drives genesis+buy through the SDK on regtest —
+  genesis txid matched the SDK's prediction; buy accepted (R 1e6→1.1e6, T 1e5→90934, out 9066).
+- `tsc --noEmit` clean; `vitest run` 46/46 (incl. legacy + v3 math).
