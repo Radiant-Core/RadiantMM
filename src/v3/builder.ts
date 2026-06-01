@@ -10,11 +10,11 @@
  *   selector (OP_0 = trade, OP_1 = release); only funding/holder inputs need signatures.
  */
 import Radiant from '@radiant-core/radiantjs';
-import { buildPoolScripts, buildStatefulOutput, encodeRef, PoolArtifacts, Hex } from './contracts.js';
+import { buildPoolScripts, buildStatefulOutput, encodeRef, RESERVE_MARKER, PoolArtifacts, Hex } from './contracts.js';
 import { quoteBuy, quoteSell, verifyAccept, Quote } from './math.js';
 
 const R = Radiant as any;
-const { Transaction, Script, PrivateKey, crypto, Address } = R;
+const { Transaction, Script, PrivateKey, crypto, Address, Opcode } = R;
 const SIGHASH = crypto.Signature.SIGHASH_ALL | crypto.Signature.SIGHASH_FORKID;
 const FLAGS = Script.Interpreter.SCRIPT_ENABLE_SIGHASH_FORKID | Script.Interpreter.SCRIPT_VERIFY_STRICTENC;
 
@@ -68,7 +68,7 @@ export function buildGenesis(p: GenesisParams): GenesisResult {
   tx.from({ txId: p.fundingA.txid, outputIndex: p.fundingA.vout, script: p.fundingA.scriptPubKey, satoshis: p.fundingA.satoshis });
   tx.from({ txId: p.fundingB.txid, outputIndex: p.fundingB.vout, script: p.fundingB.scriptPubKey, satoshis: p.fundingB.satoshis });
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(controllerCode), satoshis: p.rxdReserve })); // out0
-  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(tokenCode), satoshis: p.tokenReserve }));     // out1 (bare)
+  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(buildStatefulOutput(RESERVE_MARKER, tokenCode)), satoshis: p.tokenReserve })); // out1 (stateful marker)
   if (p.userAllocation) {
     tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(buildStatefulOutput(p.userAllocation.pkh, tokenCode)), satoshis: p.userAllocation.amount }));
   }
@@ -113,7 +113,7 @@ export function buildBuy(p: BuyParams): TradeResult {
   tx.from({ txId: p.pool.reserve.txid, outputIndex: p.pool.reserve.vout, script: '00', satoshis: p.pool.reserve.satoshis });
   tx.from({ txId: p.funding.txid, outputIndex: p.funding.vout, script: p.funding.scriptPubKey, satoshis: p.funding.satoshis });
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(controllerCode), satoshis: rxdOut }));                                   // out0
-  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(tokenCode), satoshis: tokOut }));                                        // out1
+  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(buildStatefulOutput(RESERVE_MARKER, tokenCode)), satoshis: tokOut }));   // out1 (stateful marker)
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(buildStatefulOutput(p.traderPkh, tokenCode)), satoshis: toTrader }));    // out2
   const totalIn = p.pool.controller.satoshis + p.pool.reserve.satoshis + p.funding.satoshis;
   const outSoFar = tx.outputs.reduce((s: number, o: any) => s + o.satoshis, 0);
@@ -133,13 +133,68 @@ export function buildBuy(p: BuyParams): TradeResult {
   return { hex: tx.serialize(true), quote: q, newPool };
 }
 
+export interface SellParams {
+  pool: PoolState;
+  tokensIn: number;          // tokens the trader supplies (reserve grows by this)
+  traderToken: KeyedUtxo;    // the trader's STATEFUL holder UTXO (state = their pkh)
+  rxdOutAddress: string;     // where the trader receives RXD
+  funding: KeyedUtxo;        // pays the tx fee
+  changeAddress: string;
+  feeSats: number;
+}
+
 /**
- * SELL quote (RXD out for tokens in). The controller's trade() is symmetric so the
- * controller/reserve side is identical to a buy with rxdOut < rxdIn; the only open
- * piece is the trader spending their STATEFUL token UTXO into the reserve (the
- * state-on-stack dispatch issue tracked separately). Exposed now so callers can quote
- * sells and so the builder is ready once that spend path lands.
+ * Build a SELL: trader supplies `tokensIn` tokens (spending their stateful holder via
+ * transfer()), the reserve grows, the trader receives quote.amountOut RXD. Uses the
+ * OP_DROP-dispatch resolution: in2 scriptSig is `push(pk) push(sig) OP_0`.
+ *
+ * inputs : [0] controller (OP_0 trade) [1] reserve (OP_1 release)
+ *          [2] trader stateful token (transfer + sig) [3] P2PKH funding (fee)
+ * outputs: [0] controller' (R') [1] reserve' (T+tokensIn, stateful) [2] trader RXD
+ *          [3] token change (if any, stateful) [4] RXD change
  */
-export function quoteSellRxdOut(pool: PoolState, tokensIn: number): Quote {
-  return quoteSell(BigInt(pool.controller.satoshis), BigInt(pool.reserve.satoshis), BigInt(tokensIn));
+export function buildSell(p: SellParams): TradeResult {
+  const Rr = BigInt(p.pool.controller.satoshis), Tt = BigInt(p.pool.reserve.satoshis);
+  const q = quoteSell(Rr, Tt, BigInt(p.tokensIn));
+  const acc = verifyAccept(Rr, Tt, q.rxdReserveOut, q.tokenReserveOut);
+  if (!acc.ok) throw new Error(`internal: sell quote not accepted (${acc.reason})`);
+  if (p.tokensIn > p.traderToken.satoshis) throw new Error('tokensIn exceeds trader token balance');
+
+  const { controllerCode, tokenCode } = p.pool;
+  const Rp = Number(q.rxdReserveOut), Tp = Number(q.tokenReserveOut), rxdToTrader = Number(q.amountOut);
+  const tokenChange = p.traderToken.satoshis - p.tokensIn;
+
+  const traderKey = PrivateKey.fromWIF(p.traderToken.wif);
+  const traderPkh = Buffer.from(crypto.Hash.sha256ripemd160(traderKey.toPublicKey().toBuffer()));
+  const traderLock = buildStatefulOutput(traderPkh, tokenCode); // the holder UTXO being spent
+
+  const tx = new Transaction();
+  tx.from({ txId: p.pool.controller.txid, outputIndex: p.pool.controller.vout, script: '00', satoshis: p.pool.controller.satoshis });
+  tx.from({ txId: p.pool.reserve.txid, outputIndex: p.pool.reserve.vout, script: '00', satoshis: p.pool.reserve.satoshis });
+  tx.from({ txId: p.traderToken.txid, outputIndex: p.traderToken.vout, script: p.traderToken.scriptPubKey, satoshis: p.traderToken.satoshis });
+  tx.from({ txId: p.funding.txid, outputIndex: p.funding.vout, script: p.funding.scriptPubKey, satoshis: p.funding.satoshis });
+  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(controllerCode), satoshis: Rp }));                                   // out0
+  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(buildStatefulOutput(RESERVE_MARKER, tokenCode)), satoshis: Tp }));  // out1
+  tx.to(p.rxdOutAddress, rxdToTrader);                                                                                                 // out2 trader RXD
+  if (tokenChange > 0) {
+    tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(buildStatefulOutput(traderPkh, tokenCode)), satoshis: tokenChange })); // out3
+  }
+  const totalIn = p.pool.controller.satoshis + p.pool.reserve.satoshis + p.traderToken.satoshis + p.funding.satoshis;
+  const outSoFar = tx.outputs.reduce((s: number, o: any) => s + o.satoshis, 0);
+  tx.to(p.changeAddress, totalIn - outSoFar - p.feeSats);
+
+  tx.inputs[0].setScript(Script.fromBuffer(Buffer.from([0x00]))); // trade
+  tx.inputs[1].setScript(Script.fromBuffer(Buffer.from([0x51]))); // release
+  // in2: transfer() — push(senderPk) push(sig) OP_0; OP_DROP prologue consumes the state push
+  const sig2 = Transaction.Sighash.sign(tx, traderKey, SIGHASH, 2, Script.fromBuffer(traderLock), new crypto.BN(p.traderToken.satoshis), FLAGS);
+  const ss2 = new Script();
+  ss2.add(Buffer.from(traderKey.toPublicKey().toBuffer()));
+  ss2.add(Buffer.concat([sig2.toDER(), Buffer.from([SIGHASH])]));
+  ss2.add(Opcode.OP_0);
+  tx.inputs[2].setScript(ss2);
+  signP2PKH(tx, 3, p.funding.wif, p.funding.scriptPubKey, p.funding.satoshis);
+
+  const txid = tx.id;
+  const newPool: PoolState = { ...p.pool, controller: { txid, vout: 0, satoshis: Rp }, reserve: { txid, vout: 1, satoshis: Tp } };
+  return { hex: tx.serialize(true), quote: q, newPool };
 }

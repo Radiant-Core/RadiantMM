@@ -56,12 +56,25 @@ export function buildStatefulOutput(stateData: Buffer, code: Buffer): Buffer {
   return Buffer.concat([encodePush(stateData), Buffer.from([OP_STATESEPARATOR]), code]);
 }
 
+/** Pool reserve marker state: 20 zero bytes (not the hash160 of any key, so the reserve
+ *  cannot be hijacked onto the sig-gated transfer() path). */
+export const RESERVE_MARKER = Buffer.alloc(20, 0);
+
 export interface PoolArtifacts {
   poolAsm: string;   // RadiantMMPool.json .asm
   tokenAsm: string;  // RadiantMMToken.json .asm
 }
 
-/** Build the bare controller + token code for a pool, given its refs and owner. */
+/**
+ * Build the controller + token code for a pool, given its refs and owner.
+ *
+ * The token code gets an `OP_DROP` PROLOGUE: every token UTXO is deployed STATEFUL
+ * (`<push state> OP_STATESEPARATOR <code>`), and when spent the single leading state push
+ * lands on top of the stack — OP_DROP consumes it so cashscript's selector dispatch sees
+ * the expected `[args, selector]` stack. This is what makes a holder's `transfer()` (a SELL)
+ * dispatch correctly (see BUILD_NOTES "stateful-dispatch resolution"). The controller is
+ * BARE and spent with the selector on top, so it must NOT get an OP_DROP.
+ */
 export function buildPoolScripts(
   art: PoolArtifacts,
   poolRef: Buffer,
@@ -71,6 +84,6 @@ export function buildPoolScripts(
   const subs = { '$poolRef': poolRef, '$tokenRef': tokenRef, '$ownerPkh': ownerPkh };
   return {
     controllerCode: buildBareCode(art.poolAsm, subs),
-    tokenCode: buildBareCode(art.tokenAsm, { '$tokenRef': tokenRef, '$poolRef': poolRef }),
+    tokenCode: buildBareCode('OP_DROP ' + art.tokenAsm, { '$tokenRef': tokenRef, '$poolRef': poolRef }),
   };
 }

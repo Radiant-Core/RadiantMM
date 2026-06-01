@@ -1,7 +1,7 @@
 /* Integration smoke test: drive a genesis + buy through the v3 SDK against regtest. */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { buildGenesis, buildBuy, type KeyedUtxo } from '../../src/v3/builder.js';
+import { buildGenesis, buildBuy, buildSell, type KeyedUtxo } from '../../src/v3/builder.js';
 import { verifyAccept } from '../../src/v3/math.js';
 import Radiant from '@radiant-core/radiantjs';
 const RadiantAny = Radiant as any;
@@ -36,13 +36,34 @@ rcli('generatetoaddress', '1', rcli('getnewaddress'));
 console.log('SDK genesis broadcast:', gtxid === gen.pool.controller.txid ? 'txid matches SDK prediction ✓' : `MISMATCH (${gtxid} vs ${gen.pool.controller.txid})`);
 console.log('  pool R/T:', rcli('gettxout', gtxid, '0') ? '(live)' : '(?)', gen.pool.controller.satoshis, '/', gen.pool.reserve.satoshis);
 
-const traderPkh = pkh(rcli('getnewaddress'));
+const traderAddr = rcli('getnewaddress');
+const traderPkh = pkh(traderAddr);
 const buy = buildBuy({ pool: gen.pool, rxdIn: 100_000, traderPkh, funding: fundBuy, changeAddress: rcli('getnewaddress'), feeSats: 6_000_000 });
 console.log('SDK buy quote:', { fee: buy.quote.fee.toString(), tokenReserveOut: buy.quote.tokenReserveOut.toString(), amountOut: buy.quote.amountOut.toString() });
-console.log('  verifyAccept:', verifyAccept(BigInt(gen.pool.controller.satoshis), BigInt(gen.pool.reserve.satoshis), buy.quote.rxdReserveOut, buy.quote.tokenReserveOut).ok);
 const btxid = rcli('sendrawtransaction', buy.hex);
 rcli('generatetoaddress', '1', rcli('getnewaddress'));
+const tokensBought = Math.round(JSON.parse(rcli('gettxout', btxid, '2')).value * 1e8);
 console.log('SDK buy broadcast:', btxid);
-console.log('  pool after: R =', rcli('gettxout', btxid, '0') && Math.round(JSON.parse(rcli('gettxout', btxid, '0')).value * 1e8),
+console.log('  pool after: R =', Math.round(JSON.parse(rcli('gettxout', btxid, '0')).value * 1e8),
             ' T =', Math.round(JSON.parse(rcli('gettxout', btxid, '1')).value * 1e8),
-            ' traderTokens =', Math.round(JSON.parse(rcli('gettxout', btxid, '2')).value * 1e8));
+            ' traderTokens =', tokensBought);
+
+// --- SELL: trader sells the bought tokens back via the SDK ---
+const traderTokenUtxo: KeyedUtxo = {
+  txid: btxid, vout: 2, satoshis: tokensBought,
+  scriptPubKey: JSON.parse(rcli('gettxout', btxid, '2')).scriptPubKey.hex,
+  wif: rcli('dumpprivkey', traderAddr),
+};
+const [fundSell] = distinctCoins(1);
+const sell = buildSell({
+  pool: buy.newPool, tokensIn: tokensBought, traderToken: traderTokenUtxo,
+  rxdOutAddress: rcli('getnewaddress'), funding: fundSell,
+  changeAddress: rcli('getnewaddress'), feeSats: 6_000_000,
+});
+console.log('SDK sell quote:', { fee: sell.quote.fee.toString(), tokenReserveOut: sell.quote.tokenReserveOut.toString(), rxdToTrader: sell.quote.amountOut.toString() });
+const stxid = rcli('sendrawtransaction', sell.hex);
+rcli('generatetoaddress', '1', rcli('getnewaddress'));
+console.log('SDK sell broadcast:', stxid);
+console.log('  pool after: R =', Math.round(JSON.parse(rcli('gettxout', stxid, '0')).value * 1e8),
+            ' T =', Math.round(JSON.parse(rcli('gettxout', stxid, '1')).value * 1e8),
+            ' traderRXD =', Math.round(JSON.parse(rcli('gettxout', stxid, '2')).value * 1e8));
