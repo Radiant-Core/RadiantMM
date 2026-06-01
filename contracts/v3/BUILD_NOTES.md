@@ -104,3 +104,114 @@ encoding tests; not deployable). Exported as `v3` from the package root.
 - Integration: `tools/regtest/sdk-smoke.mts` drives genesis+buy through the SDK on regtest —
   genesis txid matched the SDK's prediction; buy accepted (R 1e6→1.1e6, T 1e5→90934, out 9066).
 - `tsc --noEmit` clean; `vitest run` 46/46 (incl. legacy + v3 math).
+- NOTE: updated to the unified OP_DROP-token + stateful-reserve deployment after the sell merge.
+
+## STATEFUL-DISPATCH RESOLUTION + SELL PATH VALIDATED ON REGTEST — 2026-06-01
+
+### The problem (root cause, confirmed against Radiant-Core)
+A SELL requires the trader to SPEND their own token holder UTXO, which is stateful:
+`<push 20-byte pkh> OP_STATESEPARATOR <code>`. `VerifyScript` (interpreter.cpp:2870-2877) runs
+the scriptSig then the **whole** scriptPubKey on a shared stack; execution starts at
+`script.begin()` (interpreter.cpp:260) and **every push — including the state section's
+`0x14 <pkh>` — lands on the stack**. `OP_STATESEPARATOR` is a NOP (interpreter.cpp:1979-1983).
+So when `<code>` starts, the 20-byte pkh is on TOP of the stack — but cashscript's compiled
+function dispatch is `OP_DUP OP_0 OP_NUMEQUAL OP_IF ...`, which expects the **function selector**
+on top. `OP_NUMEQUAL` on a 20-byte value is out of script-number range → the spend fails. No
+scriptSig can fix this: the scriptSig runs *before* the scriptPubKey, so the state push always
+ends up above the selector. (The reserve dodged this earlier by being deployed bare — but a
+holder cannot be bare: `transfer()` reads the owner pkh from `tx.inputs[i].stateScript`, so the
+pkh must be committed in state.)
+
+The production Photonic/Glyph `ftScript` avoids the problem a different way: its state section
+is *executable* P2PKH (`OP_DUP OP_HASH160 <pkh> OP_EQUALVERIFY OP_CHECKSIG`) and it has **no
+selector dispatch** at all — single-purpose. cashscript's multi-function (`transfer`/`release`/
+`burn`) selector model is fundamentally incompatible with a passive leading state push.
+
+### The fix — `OP_DROP` prologue + uniform stateful deployment
+Prepend a single `OP_DROP` to the **token** code section at deploy time, so the code becomes
+`OP_DROP <cashscript dispatch>`. The leading state push (exactly one item — `buildStatefulOutput`
+emits one `encodePush`) is consumed by `OP_DROP`, leaving the stack identical to cashscript's
+P2SH execution stack `[args…, selector]`; selector dispatch then runs unchanged. `transfer()`
+still authenticates by reading the pkh from `stateScript` via introspection
+(`OP_STATESCRIPTBYTECODE_UTXO`), NOT from the dropped on-stack copy, so dropping it is safe.
+
+To keep `OP_DROP` valid for **every** token spend, all token UTXOs are deployed STATEFUL so each
+always has exactly one leading state push to drop:
+- **Holder**: state = `<20-byte pkh>` (spent via `transfer()`/`burn()`, sig-gated).
+- **Pool reserve**: state = `<20 zero bytes>` marker (spent via `release()`; 20 zeros are not the
+  hash160 of any key, so the reserve cannot be hijacked onto `transfer()`).
+The state section is **before** `OP_STATESEPARATOR`, so `codeScript` (the bytes the node hashes
+for `codeScriptValueSum`/`codeScriptCount` and the controller's continuity check) is identical
+(`OP_DROP <dispatch>`) for the reserve and every holder → token-value conservation still groups
+them as one token. The **controller** (pool) code is unchanged/BARE — it is spent with the
+selector on top and no state, so it must NOT get an `OP_DROP`.
+
+This is a deploy-time wrapper (like `buildStatefulOutput` itself), applied in `genesis.cjs`
+(`buildCode('OP_DROP ' + tokenArt.asm, …)`); the `.rxd` source is unchanged. The controller's
+`release()`-gating, outpoint pairing and K logic are all unchanged.
+
+### Validated on the local v3.0.0 regtest (datadir /tmp/rmm-regtest-sell, port 18444)
+
+| Scenario | Result | Proof |
+|----------|--------|-------|
+| Genesis with `OP_DROP` token code + stateful reserve | ACCEPTED | `genesis.cjs` (R=1e6, T=1e5, user=5e4) |
+| **BUY regression** (reserve now stateful, `release` dispatches after `OP_DROP`) | **ACCEPTED** | `trade-buy.cjs` (R 1e6→1.1e6, T 1e5→90934) |
+| **SELL** (trader spends stateful holder via `transfer()`, reserve grows, takes RXD) | **ACCEPTED** | `trade-sell.cjs` — R 1.1e6→1000573, T 90934→100000, trader recv 99427 sat; K_out==K_in=100027400000 |
+| **K-violating SELL** (take 1 sat more RXD than K allows) | **REJECTED** | `trade-attack-sell-kviolation.cjs` (false/empty top stack — `require(kOut>=kIn)`) |
+| **Naive stateful holder `transfer()`** (no `OP_DROP`) | **REJECTED** | `demo-stateful-break.cjs naive` (mandatory-script-verify-flag-failed — dispatch break) |
+| **`OP_DROP` stateful holder `transfer()`** (control, same ref env) | **ACCEPTED** | `demo-stateful-break.cjs drop` |
+
+The SELL spends 4 inputs: in0 controller `OP_0`(trade), in1 reserve `OP_1`(release), **in2 the
+stateful holder via `transfer()`** (scriptSig `push(senderPk) push(s) OP_0`, 108 B), in3 P2PKH
+funding (tx fee — the pool's RXD is too small to cover the ~10k photon/byte min-relay floor).
+Token conservation held (reserve_in 90934 + holder_in 9066 == reserve_out 100000 + change 0).
+K is enforced to the satoshi: the valid Rp=1000573 was accepted and Rp=1000572 (the adversarial)
+was rejected — adjacent integers straddling the K floor.
+
+The transfer() scriptSig order is `push(senderPk) push(s) OP_0` (verified on regtest). After
+`OP_DROP` consumes the pkh, cashscript's `OP_SWAP OP_2 OP_PICK OP_CHECKSIGVERIFY` prologue
+consumes `[senderPk, s, selector]` such that `OP_CHECKSIG` sees the pubkey on top of the sig.
+
+### ⚠ FINDING (new, audit-relevant): the token is NOT freely transferable — every transfer needs `$poolRef` in an input
+While building the standalone dispatch demo I found that a holder `transfer()` is rejected with
+`bad-txns-inputs-outputs-invalid-transaction-reference-operations` UNLESS the spending tx also
+carries `$poolRef` in one of its inputs — even though `transfer()` never executes the `release()`
+branch that uses it.
+
+Root cause (Radiant-Core `validation.h` `validateTransactionReferenceOperations`, lines
+1056-1064): the ref-induction check is **static**. It scans each *output's* script for
+`OP_REQUIREINPUTREF` refs (`buildRefSetFromScript` walks the whole script, both IF/ELSE branches,
+ignoring runtime control flow) and requires every such ref to appear in the **input** push-ref
+set (`requireRefSatisfied = validatePushRefRule(inputPushRefSet, outputRequireRefSet)`). The
+RadiantMMToken code shares ONE script across holders and the reserve, and that script contains
+`requireInputRef($poolRef)` in the `release()` branch. So **every** newly-created token output
+(including an ordinary holder→holder transfer's recipient output) statically references `$poolRef`
+and therefore requires `$poolRef` to be carried by some input of the creating tx.
+
+Confirmed empirically: `demo-stateful-break.cjs` only succeeds once a `$poolRef`-carrying UTXO is
+co-spent (`drop` mode → ACCEPTED; without it → ref-operations reject). `$poolRef` is a singleton
+that lives on the pool controller, so:
+- **Pool trades are unaffected** — buy/sell always co-spend the controller, so `$poolRef` is
+  present. The SELL above is fully valid. ✅
+- **Wallet-to-wallet transfers are effectively blocked** — a user cannot move tokens without
+  co-spending the pool controller, which contradicts `transfer()`'s stated goal of letting tokens
+  "circulate without a central authority." This is almost certainly an unintended defect.
+
+Why it's not trivially fixable: splitting the holder code (transfer/burn, no `$poolRef`) from the
+reserve code (release, with `$poolRef`) would give them different `codeScript` hashes, which
+breaks the shared-`codeScriptValueSum` conservation that ties reserve growth/shrink to holder
+tokens during a trade (a buy moves value from the reserve code-group into a holder of a *different*
+code-group → conservation fails). Recommended directions for review:
+  1. Decide whether free transferability is required. If the token is only ever meant to move
+     through the pool, document that as intended and the current code is fine.
+  2. If free transfer IS required: redesign so `release()` proves controller co-spend WITHOUT a
+     static `OP_REQUIREINPUTREF` in the shared code — e.g. verify the controller via a value/
+     introspection check the static scanner doesn't flag, or carry the reserve↔controller binding
+     entirely in the controller (it already enforces outpoint pairing), dropping `$poolRef` from
+     the token code. Each option needs its own regtest + adversarial pass.
+
+### Other minor follow-ups
+- Selling the full holder balance still emits a 0-value token-change output (out3). Harmless on
+  regtest and conservation-consistent, but a production builder should omit a 0-token change.
+
+**Fund-safety still requires external audit + testnet soak regardless of regtest results.**
