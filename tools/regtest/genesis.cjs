@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Genesis: mint $poolRef (singleton) + $tokenRef and deploy the v3 pool BARE on regtest.
+ * Genesis: mint $poolRef (singleton) + $tokenRef and deploy the v3 pool on regtest.
  *
  * Ref induction rule (Radiant-Core validation.h validateTransactionReferenceOperations):
  * an output ref is valid iff it equals a spent input's outpoint (txid_internal_LE + vout_LE)
@@ -14,6 +14,21 @@
  *   out[1]            = token reserve (marker state; carries $tokenRef); value = T_pool
  *   out[2]            = user tokens (userPkh state; carries $tokenRef); value = T_user
  *   out[3]            = RXD change (P2PKH)
+ *
+ * STATEFUL-DISPATCH FIX (unifies BUY + SELL; see ../../contracts/v3/BUILD_NOTES.md
+ * "Stateful-dispatch resolution"). Every token UTXO is deployed STATEFUL
+ * ( <push state> OP_STATESEPARATOR <code> ) and the token CODE carries an `OP_DROP` PROLOGUE.
+ * When a bare/stateful Radiant script is spent, VerifyScript runs the whole scriptPubKey, so
+ * the state push lands on TOP of the stack before the code runs. OP_DROP consumes it, leaving
+ * the stack identical to cashscript's P2SH execution stack ([args..., selector]) so the
+ * compiled `OP_DUP OP_0 OP_NUMEQUAL OP_IF` selector dispatch works for STATEFUL HOLDER spends
+ * (transfer()) — which a SELL requires. transfer()'s pkh auth reads the holder pkh from
+ * tx.inputs[i].stateScript via context (OP_STATESCRIPTBYTECODE_UTXO), NOT the stack, so
+ * dropping the on-stack copy is safe. The reserve uses a 20-zero-byte marker state. All token
+ * UTXOs share ONE (OP_DROP-prefixed) code, so codeScriptValueSum conservation still groups them.
+ * The controller (out0) is unchanged/BARE (it dispatches cleanly with the selector on top).
+ *
+ * Override the datadir with RMM_RT=/path (defaults to /tmp/rmm-regtest).
  */
 const path = require('path');
 const cp = require('child_process');
@@ -23,7 +38,7 @@ const r = require('/Users/macbookair/CascadeProjects/RadiantMM/node_modules/@rad
 const { Transaction, Script, PrivateKey, Networks } = r;
 const fs = require('fs');
 
-const RT = '/tmp/rmm-regtest';
+const RT = process.env.RMM_RT || '/tmp/rmm-regtest';
 const ART = '/Users/macbookair/CascadeProjects/RadiantMM/contracts/v3/artifacts';
 function rcli(...args) {
   const out = cp.execFileSync('/Users/macbookair/CascadeProjects/Radiant-Core/build/src/radiant-cli',
@@ -69,12 +84,15 @@ function buildCode(asm, subs) {
   return Buffer.from(Script.fromASM(a).toBuffer());
 }
 const subs = { '$poolRef': toHex(refPool), '$tokenRef': toHex(refToken), '$ownerPkh': toHex(ownerPkh) };
-const tokenCode = buildCode(tokenArt.asm, subs);
-const poolCode = buildCode(poolArt.asm, subs);
-console.log('controller code bytes:', poolCode.length, ' token code bytes:', tokenCode.length);
+// OP_DROP PROLOGUE on the token code (see header) — consumes the leading state push so the
+// stateful holder/reserve spends dispatch like cashscript's P2SH stack.
+const tokenCode = buildCode('OP_DROP ' + tokenArt.asm, subs);
+const poolCode = buildCode(poolArt.asm, subs);   // controller unchanged (bare, clean dispatch)
+console.log('controller code bytes:', poolCode.length, ' token code bytes (w/ OP_DROP):', tokenCode.length);
 
-// --- build bare locking scripts ---
-const reserveLock = tokenCode;                                                    // out1 (BARE, no state)
+// --- build locking scripts ---
+const MARKER = Buffer.alloc(20, 0);                                               // reserve marker = 20 zero bytes
+const reserveLock = Buffer.from(rs.buildStatefulOutput(MARKER, tokenCode));        // out1 (STATEFUL marker)
 const userLock = Buffer.from(rs.buildStatefulOutput(userPkh, tokenCode));          // out2 (stateful holder)
 const controllerLock = poolCode;                                                  // out0 (bare, no state)
 
@@ -129,7 +147,11 @@ fs.writeFileSync(`${RT}/genesis.json`, JSON.stringify({
   poolRef: toHex(refPool), tokenRef: toHex(refToken),
   ownerPkh: toHex(ownerPkh), userPkh: toHex(userPkh),
   ownerWif: wifA, userWif: wifB,
-  controllerLock: toHex(controllerLock), reserveLock: toHex(reserveLock),
+  controllerLock: toHex(controllerLock),
+  tokenCode: toHex(tokenCode),       // OP_DROP-prefixed token code (shared by reserve + holders)
+  marker: toHex(MARKER),             // reserve marker state (20 zero bytes)
+  reserveLock: toHex(reserveLock),   // stateful marker reserve (out1)
+  userLock: toHex(userLock),         // stateful holder (out2)
   R, T_pool, T_user,
 }, null, 2));
 process.stdout.write('GENESIS_HEX:' + hex + '\n');

@@ -4,8 +4,10 @@
  * controller enforces K = R*T (after 0.3% fee) and both pool UTXOs are recreated.
  *
  * inputs : [0]=controller (selector 0 trade)  [1]=reserve (selector 1 release)  [2]=trader RXD (P2PKH)
- * outputs: [0]=controller' (R')  [1]=reserve' (T', bare)  [2]=trader tokens (stateful)  [3]=RXD change
+ * outputs: [0]=controller' (R')  [1]=reserve' (T', stateful marker)  [2]=trader tokens (stateful)  [3]=RXD change
  * trade()/release() are permissionless — no covenant signatures, only selectors + structure.
+ * The reserve is STATEFUL (marker state) and the token code carries an OP_DROP prologue; the
+ * release() selector (OP_1) dispatches after OP_DROP consumes the state push. See genesis.cjs.
  */
 const cp = require('child_process'), fs = require('fs');
 const rs = require('/Users/macbookair/CascadeProjects/RadiantScript/packages/cashscript/dist/main/index.js');
@@ -14,14 +16,15 @@ const { Transaction, Script, PrivateKey, crypto } = r;
 const BN = crypto.BN, Sighash = Transaction.Sighash;
 const SIGHASH = crypto.Signature.SIGHASH_ALL | crypto.Signature.SIGHASH_FORKID;
 const FLAGS = Script.Interpreter.SCRIPT_ENABLE_SIGHASH_FORKID | Script.Interpreter.SCRIPT_VERIFY_STRICTENC;
-const RT = '/tmp/rmm-regtest';
+const RT = process.env.RMM_RT || '/tmp/rmm-regtest';
 const rcli = (...a) => cp.execFileSync('/Users/macbookair/CascadeProjects/Radiant-Core/build/src/radiant-cli', [`-datadir=${RT}`, '-rpcwallet=rmm', ...a], { encoding: 'utf8' }).trim();
 const toHex = (b) => Buffer.from(b).toString('hex');
 
 const g = JSON.parse(fs.readFileSync(`${RT}/genesis.json`));
 const gtxid = fs.readFileSync(`${RT}/genesis_txid.txt`, 'utf8').trim();
 const controllerLock = Buffer.from(g.controllerLock, 'hex'); // poolCode (bare)
-const tokenCode = Buffer.from(g.reserveLock, 'hex');         // tokenCode (bare reserve)
+const tokenCode = Buffer.from(g.tokenCode, 'hex');           // OP_DROP-prefixed token code
+const marker = Buffer.from(g.marker, 'hex');                 // reserve marker state
 
 // --- pool state + a chosen buy ---
 const R = g.R, T = g.T_pool;            // 1,000,000 RXD ; 100,000 tokens
@@ -39,6 +42,7 @@ console.log(`K_in=${R*T}  K_out=${effRxdOut*Tp}  ok=${effRxdOut*Tp >= R*T}`);
 const traderAddr = rcli('getnewaddress');
 const traderPkh = Buffer.from(r.Address.fromString(traderAddr).hashBuffer);
 const traderTokenLock = Buffer.from(rs.buildStatefulOutput(traderPkh, tokenCode));
+const reserveOutLock = Buffer.from(rs.buildStatefulOutput(marker, tokenCode)); // recreate stateful marker reserve
 
 // trader RXD funding coin
 const u = JSON.parse(rcli('listunspent', '1', '9999999')).filter(x => x.amount >= 1)[0];
@@ -54,7 +58,7 @@ tx.from({ txId: gtxid, outputIndex: 0, script: g.controllerLock, satoshis: R });
 tx.from({ txId: gtxid, outputIndex: 1, script: g.reserveLock, satoshis: T });             // in1 reserve
 tx.from({ txId: u.txid, outputIndex: u.vout, script: u.scriptPubKey, satoshis: fundSats });// in2 funding
 tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(controllerLock), satoshis: Rp }));        // out0
-tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(tokenCode), satoshis: Tp }));            // out1
+tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(reserveOutLock), satoshis: Tp }));       // out1 stateful reserve'
 tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(traderTokenLock), satoshis: tokensOut }));// out2
 tx.to(changeAddr, change);                                                                                // out3
 
@@ -68,4 +72,10 @@ ss.add(Buffer.concat([sig.toDER(), Buffer.from([SIGHASH])]));
 ss.add(Buffer.from(fundPriv.toPublicKey().toBuffer()));
 tx.inputs[2].setScript(ss);
 
+// Record the buy result so trade-sell.cjs can chain off the moved pool + the trader's
+// freshly-minted stateful token UTXO (out2). The buy tx's own txid is unknown until it is
+// broadcast, so the runner must write ${RT}/buy_txid.txt after sendrawtransaction.
+fs.writeFileSync(`${RT}/buy_meta.json`, JSON.stringify({
+  Rp, Tp, tokensOut, traderPkh: toHex(traderPkh),
+}, null, 2));
 process.stdout.write('TRADE_HEX:' + tx.serialize(true) + '\n');
