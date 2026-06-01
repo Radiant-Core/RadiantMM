@@ -75,8 +75,10 @@ contract RadiantMMPool(
             require(tokIn  > 0);
             require(tokOut > 0);
 
-            // K before (overflow-guarded). MAX_INT64 = 2^63 - 1.
-            require(rxdIn <= 9223372036854775807 / tokIn);
+            // K overflow guard. Bound = 2^53-1 (JS-safe so the compiler encodes it as a
+            // valid <=8-byte script number; a 2^63-1 literal mis-encodes to 9 bytes and
+            // OP_DIV fails). Caps K at ~9e15 — fine for typical pools; large pools need 128-bit math.
+            require(rxdIn <= 9007199254740991 / tokIn);
             int kIn = rxdIn * tokIn;
 
             // Fee: 0.3% on the RXD delta, ceiling division (never 0 for a non-zero delta).
@@ -90,7 +92,7 @@ contract RadiantMMPool(
             require(effRxdOut > 0);
 
             // K after (overflow-guarded) must not decrease.
-            require(effRxdOut <= 9223372036854775807 / tokOut);
+            require(effRxdOut <= 9007199254740991 / tokOut);
             int kOut = effRxdOut * tokOut;
             require(kOut >= kIn);
         },
