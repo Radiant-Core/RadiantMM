@@ -229,3 +229,34 @@ Validated on regtest after the fix:
 - genesis → buy → sell (SDK) — all still ACCEPTED.
 - **wallet-to-wallet transfer with NO pool co-spent — ACCEPTED** (was rejected before). `tools/regtest/transfer-nopool.cjs`
 - **reserve theft via release() with NO controller — REJECTED** (refType==2 fails). `/tmp/reserve-theft.cjs` (security preserved).
+
+Note — a second, independent fix for the same defect was prototyped on branch
+`worktree-agent-affdaa2c21f6a9686` (commit b50d6c2): bind the controller by CODE HASH,
+`require(hash256(tx.inputs[0].codeScript) == $controllerCodeHash)`. It also validates (free
+transfer ACCEPTED; non-controller `release()` REJECTED at `OP_EQUALVERIFY`). The **refType gate
+here is preferred** — it checks the `$poolRef` singleton directly (the actual security property),
+needs no extra constructor constant or genesis derivation, and is input-position-independent. The
+code-hash branch is kept only as a documented alternative.
+
+## SELL-side adversarial matrix (`trade-sell-adversarial.cjs`) — validated against the refType token
+
+The SELL introduces attack surface the BUY matrix never exercised: a signature-gated stateful
+holder spend and reserve/holder role confusion. Run against one post-BUY pool; every attack
+REJECTED at the specific covenant guard, and the honest `valid` sell ACCEPTED on the same pool.
+
+| Variant | Attack | Result | Fails at (guard) |
+|---------|--------|--------|------------------|
+| `valid` | honest sell | ✅ accepted | — (K_out==K_in) |
+| `theft-sig` | move a holder's tokens signing with the ATTACKER's key | ✅ rejected | `OP_EQUALVERIFY` — transfer() `hash160(senderPk)==embeddedPkh` |
+| `holder-release` | drag the holder onto `release()` (OP_1) to skip the signature | ✅ rejected | `OP_NUMEQUALVERIFY` — controller `inputs[1].outpointIndex==1` pairing |
+| `reserve-xfer` | spend the reserve via `transfer()` to bypass controller pricing | ✅ rejected | `OP_EQUALVERIFY` — pkh-bind vs the unspendable 20-zero marker |
+| `no-token-add` | take RXD but DON'T grow the reserve | ✅ rejected | false top stack — controller `kOut>=kIn` |
+| `code-reserve` | recreate the reserve with the wrong (non-token) code | ✅ rejected | `OP_EQUALVERIFY` — C2 continuity |
+| `strip-pool` | recreate the controller without `$poolRef` | ✅ rejected | `OP_EQUALVERIFY` — C2 continuity |
+
+Key results: a holder's tokens cannot be moved without their key (`theft-sig`); both auth-bypass
+routes via role confusion are closed (a holder can't be `release()`-d — the controller's outpoint
+pairing binds input[1] to the genuine reserve; the reserve can't be `transfer()`-d — its marker
+is not the hash160 of any key); and you cannot take RXD without supplying tokens (`no-token-add`).
+These guards are independent of the controller-binding mechanism, so they hold identically under
+the refType gate. Validated on /tmp/rmm-regtest-sell against the refType token.
