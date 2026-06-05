@@ -1,3 +1,7 @@
+# ⛔ DEPRECATED / UNSAFE — DO NOT DEPLOY. Superseded by contracts/v3/ (paired-UTXO model).
+# This hand-written v1 script has the C1/C2 criticals (unbacked token reserves; frozen state)
+# AND diverges from the .rxd (floor-fee, no overflow guard). See SECURITY-AUDIT.md. History only.
+#
 # RadiantMM v1.0 - Optimized Bitcoin Script
 # SPDX-License-Identifier: MIT
 #

@@ -15,6 +15,10 @@
  *   dust-rxd    : RXD reserve out0 below 546            -> REJECT (dust guard)
  *   zero-token  : token reserve out1 = 0                -> REJECT (tokOut>0)
  *   dup-pool    : two outputs carry $poolRef            -> REJECT (singleton/refcount)
+ *   state-hijack: reserve out1 = SAME code, ATTACKER pkh state (no-op trade, full reserve
+ *                 to an attacker-owned holder)           -> REJECT (R1 state continuity)
+ *   brick       : controller out0 recreated STATEFUL (same code + junk state) to freeze
+ *                 future dispatch                         -> REJECT (anti-brick state continuity)
  */
 const cp = require('child_process'), fs = require('fs');
 const rs = require('/Users/macbookair/CascadeProjects/RadiantScript/packages/cashscript/dist/main/index.js');
@@ -44,6 +48,10 @@ let tokensOut = T - Tp;
 const traderAddr = rcli('getnewaddress');
 const traderPkh = Buffer.from(r.Address.fromString(traderAddr).hashBuffer);
 const traderTokenLock = Buffer.from(rs.buildStatefulOutput(traderPkh, tokenCode));
+// The reserve output is STATEFUL (20-zero marker) — must match the genesis reserve's state,
+// which the controller now pins via state-continuity (R1 fix). A bare reserve output (no state)
+// is correctly REJECTED post-fix.
+const reserveMarkerLock = Buffer.from(rs.buildStatefulOutput(Buffer.from(g.marker, 'hex'), tokenCode));
 const p2pkh = (addr) => Script.fromAddress(addr).toBuffer();
 
 const u = JSON.parse(rcli('listunspent', '1', '9999999')).filter(x => x.amount >= 1)[0];
@@ -54,7 +62,7 @@ const changeAddr = rcli('getnewaddress');
 
 // output values per variant (keep value balanced: sum(out)=sum(in)-FEE_TX)
 let rxdOut0 = Rp, tokOut1 = Tp, tOut2 = tokensOut;
-let lock0 = controllerLock, lock1 = tokenCode, lock2 = traderTokenLock;
+let lock0 = controllerLock, lock1 = reserveMarkerLock, lock2 = traderTokenLock;
 const junk = p2pkh(rcli('getnewaddress'));            // a non-covenant script
 
 if (variant === 'code-ctrl')    lock0 = junk;                         // wrong controller code
@@ -62,6 +70,19 @@ if (variant === 'code-reserve') lock1 = junk;                         // wrong r
 if (variant === 'strip-pool')   lock0 = p2pkh(rcli('getnewaddress')); // controller code w/o $poolRef
 if (variant === 'dust-rxd')     rxdOut0 = 500;                        // below 546
 if (variant === 'zero-token') { tokOut1 = 0; tOut2 = T; }             // reserve drained to 0 (conserved to trader)
+// R1 (state hijack): recreate reserve out1 with the SAME token code but an ATTACKER pkh state
+// instead of the marker — a no-op trade (Tp=T) that, pre-fix, seized the whole reserve. MUST REJECT.
+if (variant === 'state-hijack') {
+  const atkPkh = Buffer.from(r.Address.fromString(rcli('getnewaddress')).hashBuffer);
+  lock1 = Buffer.from(rs.buildStatefulOutput(atkPkh, tokenCode));
+  tokOut1 = T; rxdOut0 = R; tOut2 = 0;                                // no-op trade, full reserve to the attacker holder
+}
+// Anti-brick: recreate the controller out0 as STATEFUL (same code, bolted-on junk state). Pre-fix
+// this passed code-only continuity and bricked all future dispatch (RXD freeze). MUST REJECT.
+if (variant === 'brick') {
+  lock0 = Buffer.from(rs.buildStatefulOutput(Buffer.alloc(20, 1), controllerLock));
+  rxdOut0 = R; tokOut1 = T; tOut2 = 0;
+}
 
 const tx = new Transaction();
 tx.from({ txId: gtxid, outputIndex: 0, script: g.controllerLock, satoshis: R });
@@ -71,12 +92,12 @@ tx.from({ txId: u.txid, outputIndex: u.vout, script: u.scriptPubKey, satoshis: f
 if (variant === 'layout') {
   // controller recreated at out2 instead of out0; out0 = junk
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(junk), satoshis: rxdOut0 }));
-  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(tokenCode), satoshis: tokOut1 }));
+  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(reserveMarkerLock), satoshis: tokOut1 }));
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(controllerLock), satoshis: 546 }));
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(traderTokenLock), satoshis: tOut2 }));
 } else if (variant === 'dup-pool') {
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(controllerLock), satoshis: rxdOut0 }));
-  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(tokenCode), satoshis: tokOut1 }));
+  tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(reserveMarkerLock), satoshis: tokOut1 }));
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(controllerLock), satoshis: 546 })); // 2nd $poolRef carrier
   tx.addOutput(new Transaction.Output({ script: Script.fromBuffer(traderTokenLock), satoshis: tOut2 }));
 } else {

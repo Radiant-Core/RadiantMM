@@ -1,5 +1,9 @@
 # RadiantMM Security Audit
 
+> ⚠️ **HISTORICAL — this document audits the v1 single-UTXO design (commit `8661256`).**
+> The current contracts are the **v3 paired-UTXO model**; see **[SECURITY-AUDIT-v3.md](SECURITY-AUDIT-v3.md)**
+> for the authoritative audit (incl. the R1 reserve-state-hijack finding, now fixed + regtest-verified).
+
 **Date:** 2026-05-31
 **Scope:** `contracts/RadiantMMPool.rxd`, `contracts/RadiantMMPool.script`, the TypeScript SDK under `src/`, `tests/`, and the specs (`docs/CONTRACT_SPEC.md`, `RadiantMM_Whitepaper.md`).
 **Commit reviewed:** `8661256` (`main`).

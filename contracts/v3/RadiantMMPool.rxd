@@ -3,12 +3,19 @@ pragma radiantscript ^1.1.0;
 // RadiantMMPool — paired-UTXO CPMM controller (v3)
 // SPDX-License-Identifier: MIT
 //
+// TRUST MODEL (R3): this is a SINGLE-CUSTODIAN pool. withdraw() releases the ENTIRE RXD
+// reserve to whoever holds ownerPkh's key, with no LP-share token, timelock, or quorum.
+// There is no multi-LP liquidity model — anyone adding value MUST trust the owner not to
+// rug. trade() is trustless (constant-product enforced at consensus); custody is not.
+//
 // See ../../docs/REDESIGN_C1_C2.md. The pool is TWO co-spent UTXOs:
 //   input[0]/output[0] = RXD reserve   (THIS contract; value = R; carries singleton $poolRef)
 //   input[1]/output[1] = token reserve (RadiantMMToken; value = T = real coloured tokens)
 //
-// C2 fix: code-only continuity via tx.outputs[i].codeScript == tx.inputs[i].codeScript,
-//         so the immutable logic is preserved while value/state may change.
+// C2 fix: code + state continuity via tx.outputs[i].{codeScript,stateScript} ==
+//         tx.inputs[i].{codeScript,stateScript}, so the immutable logic AND the role of
+//         each pool UTXO are preserved while only the value (token/RXD amount) may change.
+//         (Code-only continuity was insufficient — see the R1 note below.)
 // C1 fix: token_in / token_out are the REAL coloured-satoshi values of the token-reserve
 //         input/output (tx.inputs[1].value / tx.outputs[1].value) — consensus-conserved by
 //         RadiantMMToken — not a spender-written state integer.
@@ -49,9 +56,22 @@ contract RadiantMMPool(
             require(tx.inputs[1].outpointIndex == 1);
             require(tx.inputs[1].outpointTransactionHash == tx.inputs[0].outpointTransactionHash);
 
-            // --- C2: code-only continuity for BOTH pool UTXOs ---------------------
-            require(tx.outputs[0].codeScript == tx.inputs[0].codeScript);  // controller
-            require(tx.outputs[1].codeScript == tx.inputs[1].codeScript);  // token reserve
+            // --- C2: code + STATE continuity for BOTH pool UTXOs ------------------
+            // R1 (critical): code-only continuity is INSUFFICIENT. Every token UTXO shares
+            // ONE code (`OP_DROP <tokenAsm>`) regardless of its state section, so without a
+            // state check an attacker could recreate the reserve output[1] with the SAME code
+            // but THEIR OWN pkh as the state — turning the pool reserve into an ordinary holder
+            // UTXO they control, seizing the entire token reserve while K passed trivially
+            // (rxdOut==rxdIn, tokOut==tokIn). The symmetric hole on output[0] let an attacker
+            // bolt a state section onto the bare controller, bricking all future dispatch
+            // (permanent RXD freeze). Both are closed by pinning STATE as well as code: the
+            // reserve state is always the marker and the controller is always bare, so this
+            // never rejects an honest trade, and the token AMOUNT still varies freely because
+            // nValue is not part of the scriptPubkey.
+            require(tx.outputs[0].codeScript  == tx.inputs[0].codeScript);   // controller code
+            require(tx.outputs[0].stateScript == tx.inputs[0].stateScript);  // controller stays bare (anti-brick)
+            require(tx.outputs[1].codeScript  == tx.inputs[1].codeScript);   // token reserve code
+            require(tx.outputs[1].stateScript == tx.inputs[1].stateScript);  // reserve marker state preserved — R1 fix
 
             // Singleton pool id preserved on exactly one output (the recreated controller).
             require(tx.outputs.refOutputCount($poolRef) == 1);

@@ -1,3 +1,8 @@
+// ⛔ DEPRECATED / UNSAFE — DO NOT DEPLOY. Superseded by contracts/v3/RadiantMMPool.rxd.
+// This v1 single-UTXO design has critical structural flaws C1 (token reserves are unbacked
+// spender-written integers — pool RXD trivially drainable) and C2 (full-bytecode continuity
+// freezes state so no swap is possible). See SECURITY-AUDIT.md. Kept for history only.
+//
 // RadiantMM Micro-Pool Contract v1.1
 // SPDX-License-Identifier: MIT
 //

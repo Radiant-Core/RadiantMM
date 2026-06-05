@@ -11,7 +11,7 @@
  */
 import Radiant from '@radiant-core/radiantjs';
 import { buildPoolScripts, buildStatefulOutput, encodeRef, RESERVE_MARKER, PoolArtifacts, Hex } from './contracts.js';
-import { quoteBuy, quoteSell, verifyAccept, Quote } from './math.js';
+import { quoteBuy, quoteSell, verifyAccept, Quote, MAX, DUST } from './math.js';
 
 const R = Radiant as any;
 const { Transaction, Script, PrivateKey, crypto, Address, Opcode } = R;
@@ -60,6 +60,13 @@ export interface GenesisResult { hex: Hex; pool: PoolState; outputs: { controlle
 
 /** Build the genesis tx: mint $poolRef/$tokenRef from the two funding outpoints and deploy bare. */
 export function buildGenesis(p: GenesisParams): GenesisResult {
+  // R4: the on-chain K guard caps R*T at MAX (2^53-1). A pool created above that bound can
+  // never trade (every trade() aborts at the overflow guard), stranding its reserves. Reject
+  // it at creation rather than minting an untradeable pool. Reserves must also clear dust.
+  if (p.rxdReserve < Number(DUST)) throw new Error(`rxdReserve ${p.rxdReserve} below dust ${DUST}`);
+  if (p.tokenReserve <= 0) throw new Error('tokenReserve must be > 0');
+  const k = BigInt(p.rxdReserve) * BigInt(p.tokenReserve);
+  if (k > MAX) throw new Error(`pool R*T (${k}) exceeds the on-chain overflow bound ${MAX}; the contract's K guard would make every trade fail. Reduce reserves so R*T <= ${MAX} (needs 128-bit contract math otherwise).`);
   const poolRef = encodeRef(p.fundingA.txid, p.fundingA.vout);
   const tokenRef = encodeRef(p.fundingB.txid, p.fundingB.vout);
   const { controllerCode, tokenCode } = buildPoolScripts(p.art, poolRef, tokenRef, p.ownerPkh);
