@@ -33,8 +33,12 @@ const rcli = (...a) => cp.execFileSync('/Users/macbookair/CascadeProjects/Radian
 const variant = process.argv[2] || 'valid';
 const g = JSON.parse(fs.readFileSync(`${RT}/genesis.json`));
 const gtxid = fs.readFileSync(`${RT}/genesis_txid.txt`, 'utf8').trim();
-const controllerLock = Buffer.from(g.controllerLock, 'hex');
-const tokenCode = Buffer.from(g.reserveLock, 'hex');
+const controllerLock = Buffer.from(g.controllerLock, 'hex'); // poolCode (bare)
+// SHARED token code = OP_DROP-prefixed code, NOT g.reserveLock. g.reserveLock is the FULL
+// stateful reserve OUTPUT (= buildStatefulOutput(marker, tokenCode)); using it as the code
+// double-wraps every output and trips Radiant's tx-level ref-induction check (code 19) before
+// the covenant ever runs. Match genesis.cjs / trade-buy.cjs: rebuild outputs from g.tokenCode.
+const tokenCode = Buffer.from(g.tokenCode, 'hex');
 const R = g.R, T = g.T_pool;
 const addRxd = 100_000, Rp = R + addRxd;
 const fee = Math.ceil(addRxd * 3 / 1000);             // 300
