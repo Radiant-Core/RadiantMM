@@ -227,16 +227,46 @@ done
 > variants reject at code **16** (script `OP_EQUALVERIFY`), i.e. at the contract's own
 > state-continuity check, which is the behaviour we want to demonstrate.
 
-### 6.3 Sell-side adversarial matrix — partially reproduced here
+### 6.3 Sell-side adversarial matrix (on-chain, consensus-level)
 
 `tools/regtest/trade-sell-adversarial.cjs` covers sell-specific surface (`theft-sig`,
-`holder-release`, `reserve-xfer`, `no-token-add`, `code-reserve`, `strip-pool`). It requires a
-**post-BUY pool state** as inputs (controller', reserve', trader holder), which the genesis-only
-datadir does not stage. SECURITY-AUDIT-v3.md records this matrix as 6/6 rejecting + honest sell
-accepting at the time of the fix (2026-06-04). **It was NOT re-run in the 2026-06-09 pass** (the
-datadir was at genesis, not post-buy). To reproduce: run a `valid` buy to advance the pool, mine it,
-re-derive the post-buy genesis, then iterate the sell variants. This is the **one matrix the auditor
-should re-stage from scratch** rather than trust the prior record — flagged in §8.
+`holder-release`, `reserve-xfer`, `no-token-add`, `code-reserve`, `strip-pool`). Unlike the buy
+matrix it requires a **post-BUY pool state** as inputs (controller', reserve', trader holder), which
+the genesis-only datadir does not stage — so historically this was the one matrix that had to be
+hand-staged. Helper: `tools/soak/run-sell-matrix.sh` (added in this package) now automates exactly
+that. Whenever `buy_txid.txt` is missing, the recorded buy's reserve (`gettxout buy_txid 1`) is
+spent, or the recorded buy is from an older genesis lineage (its controller no longer matches the
+current `genesis.json`, which would make even the honest `valid` sell reject at ref code 19), it
+stages a fresh pool — runs `trade-buy.cjs` against the current genesis, broadcasts it, and mines 1
+block — then runs the six reject variants + honest `valid` through `testmempoolaccept`, printing a
+PASS/FAIL table and exiting non-zero on any mismatch. The staging buy is the only thing it mines; the
+matrix itself reuses the post-buy UTXOs non-destructively, exactly like §6.2. Run it (from the repo
+root; the wrapper resolves the harness paths relative to itself):
+
+```sh
+RMM_RT=/tmp/rmm-regtest \
+RADIANT_CLI=/Users/macbookair/CascadeProjects/Radiant-Core/build/src/radiant-cli \
+  tools/soak/run-sell-matrix.sh
+```
+
+**Last run (2026-06-10, node v3.1.1, /tmp/rmm-regtest), via `testmempoolaccept`:**
+
+| variant | expected | got | reject-reason |
+|---|---|---|---|
+| theft-sig | REJECT | REJECT | 16 OP_EQUALVERIFY (pkh-bind) |
+| holder-release | REJECT | REJECT | 16 OP_NUMEQUALVERIFY (controller pairing) |
+| reserve-xfer | REJECT | REJECT | 16 OP_EQUALVERIFY (transfer-marker) |
+| no-token-add | REJECT | REJECT | 16 false-top-stack (K) |
+| code-reserve | REJECT | REJECT | 16 OP_EQUALVERIFY (continuity) |
+| strip-pool | REJECT | REJECT | 16 OP_EQUALVERIFY (continuity) |
+| valid | ACCEPT | ACCEPT | — |
+
+7/7 as expected (six rejects + honest sell; `valid` runs last so the reject probes never disturb it).
+The staging, reuse, wallet-auto-load, and fail-exit paths were all exercised on this run. This
+re-confirms SECURITY-AUDIT-v3.md's original 6/6-rejecting + honest-sell record (2026-06-04) against
+Core v3.1.1 — so this is no longer a matrix the auditor must re-stage from scratch; re-running the
+wrapper reproduces it. Note this remains a **regtest**, single-genesis re-run, not a public-testnet
+soak — the soak (`TESTNET-SOAK-PLAN.md`, §8) still exercises the sell path across varied pools.
 
 ---
 
@@ -261,10 +291,13 @@ should re-stage from scratch** rather than trust the prior record — flagged in
 
 **Gaps where "verified" is weaker than it sounds — disclose to the auditor:**
 
-1. **Sell-side matrix not re-run in the latest pass.** §6.3. The 6/6 sell rejections + honest-sell
-   acceptance are from the 2026-06-04 record, not the 2026-06-09 re-run. The buy matrix, the R1
-   standalone PoC, vitest, and the artifact opcode check *were* re-run on 2026-06-09. **Recommendation:
-   the auditor re-stages the post-buy pool and re-runs the sell matrix from scratch.**
+1. **Sell-side matrix — now automated and re-run (2026-06-10).** §6.3. Previously this matrix stood
+   on the 2026-06-04 record only; the 2026-06-09 pass left the datadir at genesis and did not re-run
+   it. `tools/soak/run-sell-matrix.sh` (commit `c77f553`) now stages the post-buy pool and runs the
+   matrix in one step, and it was re-run **7/7 (six rejects + honest sell)** on /tmp/rmm-regtest
+   against Core v3.1.1 on 2026-06-10 — so this gap is closed by tooling: the auditor re-runs the
+   wrapper rather than hand-staging. Residual: that re-run is regtest + single-genesis, so
+   public-testnet sell-path coverage still belongs to the soak (gap 3, `TESTNET-SOAK-PLAN.md`).
 2. **`fee-min` boundary is computed, not separately fuzzed.** The matrix uses the analytically
    minimal `Tp` (`TpMin = ceil(R·T / effRxdOut)`) for both `valid` and `fee-min`; it confirms the
    K-boundary accepts at the minimum and rejects one below (`fee-underpay`), but does not fuzz a band
