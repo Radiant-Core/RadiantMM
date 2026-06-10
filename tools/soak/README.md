@@ -24,6 +24,36 @@ Expected: `valid`, `fee-min` ACCEPT; the other 11 REJECT (`state-hijack`/`brick`
 `OP_EQUALVERIFY` = the R1/R1b state-continuity check; `dup-pool` at reject-code 19 = the singleton-ref
 gate). 13/13. Last green: 2026-06-09, regtest node v3.1.0.
 
+## `run-sell-matrix.sh`
+
+Runs the full sell-side adversarial matrix (`../regtest/trade-sell-adversarial.cjs`, 7 variants)
+against a live node **via `testmempoolaccept`** (nothing is mined for the matrix; the post-buy pool is
+reused for every variant). Prints a PASS/FAIL table and exits non-zero on any mismatch.
+
+```sh
+RMM_RT=/tmp/rmm-regtest \
+RADIANT_CLI=/path/to/radiant-cli \
+HARNESS=/abs/path/RadiantMM/tools/regtest/trade-sell-adversarial.cjs \
+BUY_HARNESS=/abs/path/RadiantMM/tools/regtest/trade-buy.cjs \
+  ./run-sell-matrix.sh
+```
+
+Unlike the buy matrix, the sell harness needs a **post-buy** pool as its inputs (controller'@vout0,
+reserve'@vout1, trader holder@vout2 of a *mined* buy) and reads `$RMM_RT/buy_txid.txt` +
+`buy_meta.json`. If that pool is missing, its reserve (`gettxout buy_txid 1`) is already spent, or it
+belongs to an **older genesis lineage** (its controller no longer matches the current `genesis.json`,
+which the sell harness builds its outputs from — a cross-lineage buy makes even the honest `valid`
+sell reject at ref code 19), the wrapper **stages a fresh one first**: it runs `trade-buy.cjs` against
+the current genesis, broadcasts that buy, records the txid, and mines 1 block. The staging buy is the
+only thing this script mines; the matrix itself never touches the chain. The wrapper also `loadwallet
+rmm` if `listwallets` lacks it (the wallet is not auto-loaded after a daemon restart).
+
+Expected: `valid` ACCEPTs; the other 6 REJECT — `theft-sig`/`reserve-xfer`/`code-reserve`/`strip-pool`
+at `OP_EQUALVERIFY` (pkh-bind / transfer-marker / continuity), `holder-release` at `OP_NUMEQUALVERIFY`
+(controller pairing), `no-token-add` at a false top stack (the K check). `valid` runs last so the
+reject probes never disturb it. 7/7. Last green: 2026-06-10, regtest node v3.1.1 (staging path
+exercised).
+
 ## `soak-monitor.cjs`
 
 Read-only pool invariant monitor. Follows a pool forward from its genesis controller outpoint and

@@ -138,19 +138,24 @@ dup-pool, state-hijack, brick` must REJECT; `valid, fee-min` must ACCEPT. Point 
 or by extending the harness to read the head outpoint from an arg. Use `testmempoolaccept` so probes
 don't consume the head.
 
-**Sell matrix** — `tools/regtest/trade-sell-adversarial.cjs`:
+**Sell matrix** — `tools/soak/run-sell-matrix.sh` (wraps `tools/regtest/trade-sell-adversarial.cjs`):
 `theft-sig, holder-release, reserve-xfer, no-token-add, code-reserve, strip-pool` must REJECT;
-honest `valid` sell must ACCEPT. **This matrix requires a post-buy pool state as inputs** and was
-*not* re-run in the 2026-06-09 pass — the soak is the right place to exercise it continuously
-(audit-package §8 gap 1). Stage it by doing a buy first, then running the sell variants against the
-resulting head.
+honest `valid` sell must ACCEPT (`valid` runs last). Use `testmempoolaccept` so probes don't consume
+the head. **This matrix requires a post-buy pool state as inputs** (controller'@vout0, reserve'@vout1,
+trader holder@vout2 of a *mined* buy) and was *not* re-run in the 2026-06-09 pass — the soak is the
+right place to exercise it continuously (audit-package §8 gap 1). The wrapper **auto-stages** that
+post-buy pool when `$RMM_RT/buy_txid.txt` is missing, its reserve (`gettxout buy_txid 1`) is spent, or
+it is from an older genesis lineage: it fires one `trade-buy.cjs` buy against the current genesis,
+broadcasts it, and mines 1 block before running the sell variants against the resulting head. (It also
+`loadwallet rmm` if `listwallets` lacks it.)
 
 **Standalone drain PoC** — `tools/regtest/trade-attack-state-hijack.cjs attack`: the byte-for-byte
 pre-fix exploit. Must REJECT at `OP_EQUALVERIFY` every time. This is the single most important probe:
 if it ever confirms, the soak has failed catastrophically.
 
-Recommended automation: a cron/systemd timer firing the buy matrix + sell matrix + drain PoC every
-6 h via `testmempoolaccept`, logging any `allowed:true` on an attack variant as a P2 failure.
+Recommended automation: a cron/systemd timer firing `tools/soak/run-buy-matrix.sh` +
+`tools/soak/run-sell-matrix.sh` + the drain PoC every 6 h via `testmempoolaccept`, logging any
+`allowed:true` on an attack variant (a non-zero exit from either wrapper) as a P2 failure.
 
 ---
 
@@ -170,8 +175,9 @@ Recommended automation: a cron/systemd timer firing the buy matrix + sell matrix
 
 ## 7. Pre-flight checklist (before starting the soak)
 
-- [ ] Local regtest matrix green (re-run `tools/soak/run-buy-matrix.sh` → 13/13; vitest 50/50;
-      standalone PoC rejects). *(Done 2026-06-09 on regtest; re-run on the soak box.)*
+- [ ] Local regtest matrix green (re-run `tools/soak/run-buy-matrix.sh` → 13/13 and
+      `tools/soak/run-sell-matrix.sh` → 7/7; vitest 50/50; standalone PoC rejects). *(Buy done
+      2026-06-09; sell wrapper added + green 2026-06-10 on regtest v3.1.1. Re-run on the soak box.)*
 - [ ] `radiantd -testnet` synced to tip (RPC 27332), soak wallet funded.
 - [ ] Pools A–E deployed via `buildGenesis`; genesis txids recorded.
 - [ ] One monitor process per pool, supervised, paging on non-zero exit.
