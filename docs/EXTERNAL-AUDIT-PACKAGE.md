@@ -1,6 +1,6 @@
 # RadiantMM v3 — External Audit Hand-off Package
 
-**Prepared:** 2026-06-09
+**Prepared:** 2026-06-09 · **Updated:** 2026-06-10 (full re-validation against Radiant-Core v3.1.1; sell matrix automated + re-run; artifact reproducibility verified; covenant lint pass)
 **Target:** an external auditor starting cold. This is the single entry point.
 **Status of the code:** all internally-identified findings (R1, R1b, R2–R6) are fixed and
 re-verified on a local regtest node; the suite is green. The two remaining blockers before
@@ -122,8 +122,11 @@ require(tx.outputs[1].stateScript == tx.inputs[1].stateScript);  // reserve mark
 ```
 
 Compiled artifact (`contracts/v3/artifacts/RadiantMMPool.json`) contains **2× `OP_STATESCRIPTBYTECODE_OUTPUT`**
-and **2× `OP_CODESCRIPTBYTECODE_OUTPUT`** (verified 2026-06-09), and **0× `OP_2MUL`/`OP_2DIV`** with
+and **2× `OP_CODESCRIPTBYTECODE_OUTPUT`** (re-verified 2026-06-10 at HEAD), and **0× `OP_2MUL`/`OP_2DIV`** with
 **3× `OP_MUL`/`OP_DIV`** — i.e. the RadiantScript MUL/DIV-lowering bug is *not* present in this build.
+The artifacts are **reproducible from source**: recompiling both `.rxd` files yields a byte-identical
+`asm` field (verified 2026-06-10 against rxdc `1.1.1-v2` and unchanged across the rxdc `1.2.0`
+recompile, commit `aa50250` — asm SHA-256 identical before/after; only metadata fields moved). See §6.4.
 
 ---
 
@@ -165,8 +168,11 @@ finding.
 
 - A Radiant-Core node (`radiantd`/`radiant-cli`) **with native introspection + ref opcodes active**.
   The harness was last run against the locally-built node at
-  `/Users/macbookair/CascadeProjects/Radiant-Core/build/src/` (reported version `v3.1.0`; the
-  contracts were authored/compiled under v3.0.0 — the matrix passes on both).
+  `/Users/macbookair/CascadeProjects/Radiant-Core/build/src/` — most recently a clean
+  **v3.1.1** build (`d2957725`); the contracts were authored/compiled under v3.0.0 and the full
+  matrix passes identically on v3.0.0, v3.1.0 and v3.1.1. Note regtest sets
+  `SecurityUpgradeHeight = 0` (`src/chainparams.cpp`), so all results are under
+  **post-`SCRIPT_SECURITY_UPGRADE` semantics** — the rules mainnet adopts at block 440000.
 - A funded regtest wallet. The harness datadir is `/tmp/rmm-regtest` (RPC 18443, wallet `rmm`).
 - `node` + the repo's `node_modules` (`@radiant-core/radiantjs`) and the RadiantScript SDK at
   `/Users/macbookair/CascadeProjects/RadiantScript/packages/cashscript/dist/`.
@@ -175,6 +181,11 @@ Bring up the regtest node and genesis per `tools/regtest/README.md` (mkdir datad
 -datadir=/tmp/rmm-regtest -listen=0 -daemon`, `createwallet rmm`, mine ~115 blocks so ER@100 /
 PushTXState@110 are active, then `node tools/regtest/genesis.cjs`). **Paths in the `.cjs` harnesses
 are absolute and machine-specific — adjust the `Radiant-Core` / `RadiantScript` paths for your box.**
+Gotcha: the wallet is **not auto-loaded** after a daemon restart — run
+`radiant-cli -datadir=/tmp/rmm-regtest loadwallet rmm` first (the harnesses fail with RPC error
+-18 otherwise; `run-sell-matrix.sh` handles this itself). Note the build/broadcast harnesses
+(`genesis.cjs`, `trade-buy.cjs`) only **print** `GENESIS_HEX:`/`TRADE_HEX:` — the runner must
+`sendrawtransaction`, record the txid (`genesis_txid.txt` / `buy_txid.txt`), and mine a block.
 
 ### 6.1 Vitest (off-chain math/builder/parser) — fast, no node needed
 
@@ -182,7 +193,7 @@ are absolute and machine-specific — adjust the `Radiant-Core` / `RadiantScript
 npx vitest run
 ```
 
-Last run (2026-06-09): **50 passed / 50** across `tests/{v3-math,math,trade,script,pool,v3-builder}.test.ts`.
+Last run (2026-06-10): **50 passed / 50** across `tests/{v3-math,math,trade,script,pool,v3-builder}.test.ts`.
 `npx tsc --noEmit` is clean.
 
 ### 6.2 Buy-side adversarial matrix (on-chain, consensus-level)
@@ -200,7 +211,8 @@ for v in valid fee-min fee-underpay k-violation code-ctrl code-reserve strip-poo
 done
 ```
 
-**Last run (2026-06-09, node v3.1.0, /tmp/rmm-regtest @ block 151), via `testmempoolaccept`:**
+**Last run (2026-06-10), twice via `testmempoolaccept` — on node v3.1.0 and again on a clean
+v3.1.1 build (`d2957725`) with a freshly mined genesis — identical 13/13 results both times:**
 
 | variant | expected | got | reject-reason |
 |---|---|---|---|
@@ -220,7 +232,7 @@ done
 
 13/13 as expected. The standalone byte-for-byte exploit
 `node tools/regtest/trade-attack-state-hijack.cjs attack` → `testmempoolaccept` also **rejects at
-`OP_EQUALVERIFY`** — the cleanest isolation of the R1 fix.
+`OP_EQUALVERIFY`** — the cleanest isolation of the R1 fix (re-confirmed 2026-06-10 under v3.1.1).
 
 > Note on gates: `dup-pool` rejects at consensus reject-code **19** (`...reference-operations`), which
 > is the *correct* gate for a duplicated singleton ref — it never reaches the covenant. The R1/R1b
@@ -268,6 +280,35 @@ Core v3.1.1 — so this is no longer a matrix the auditor must re-stage from scr
 wrapper reproduces it. Note this remains a **regtest**, single-genesis re-run, not a public-testnet
 soak — the soak (`TESTNET-SOAK-PLAN.md`, §8) still exercises the sell path across varied pools.
 
+### 6.4 Static checks: artifact reproducibility + covenant lint
+
+**Reproducibility (run 2026-06-10):** recompile both `.rxd` sources and diff the artifact `asm`
+against the committed JSON:
+
+```sh
+node /Users/macbookair/CascadeProjects/RadiantScript/packages/cashc/dist/main/cashc-cli.js \
+  contracts/v3/RadiantMMPool.rxd -o /tmp/rmm-recompile/RadiantMMPool.json   # likewise Token
+```
+
+The `asm` field — the only artifact field any deploy path consumes (`src/v3/contracts.ts`,
+`tools/regtest/genesis.cjs` build locking scripts exclusively from it) — is **byte-identical** to
+the committed artifacts. Verified against rxdc `1.1.1-v2` (dist freshness confirmed: a clean
+rebuild changed nothing), and the asm SHA-256 is unchanged across the published-rxdc-`1.2.0`
+recompile (`aa50250`). Both `.rxd` files declare `pragma radiantscript ^1.1.0`, which both
+compiler versions satisfy. Residual compiler-trust work for the auditor is in §8 item 4.
+
+**Covenant lint (run 2026-06-10, rxdc `--covenant-lint`):** `RadiantMMToken.rxd` — **zero
+findings** (its conservation uses the exact `codeScriptCount`/`codeScriptValueSum` stitch the lint
+canonicalises). `RadiantMMPool.rxd` — **12 warnings, all expected** (since rxdc 1.2.0 they are
+also embedded in the artifact's `warnings` array): 9× `dead-computed-value` are a known rule
+blind spot (the rule does not count range-guard reads, and a CPMM's binding constraint *is* the
+inequality `kOut >= kIn` — the matrix proves these guards bind, rejecting K-violations at
+adjacent integers); `missing-continuity` / `missing-value-conservation` miss the index-pinned
+equality continuity and the K-law (value is *not* conserved 1:1 in a CPMM by design); and
+`auth-only-spend` on `withdraw()` is precisely the disclosed R3 custody path. The pool fails
+`--covenant-lint error` (and `--strict`) without suppression directives — expected; do not
+"fix" these warnings, but do confirm the assessments.
+
 ---
 
 ## 7. Contract entry-point quick reference
@@ -306,11 +347,14 @@ soak — the soak (`TESTNET-SOAK-PLAN.md`, §8) still exercises the sell path ac
    T=100,000). The math is exercised across more vectors in vitest (`tests/v3-math.test.ts`), but the
    *contract* is not run on-chain across a spread of reserve ratios, large/small Δ, or near the R4
    overflow bound. The soak plan (`TESTNET-SOAK-PLAN.md`) addresses this with varied pools.
-4. **Compiler trust.** Consensus runs the compiled artifact, not the `.rxd`. We checked the artifact
-   has the expected opcodes (2× state-continuity, no 2MUL/2DIV), but a full audit should diff the
-   artifact ASM against the source semantics line-by-line and ideally recompile with a pinned
-   `rxdc` and confirm byte-identical output. The RadiantScript compiler itself has a documented
-   MUL/DIV-lowering history (see repo memory `radiantscript_muldiv_bug`); confirm independently.
+4. **Compiler trust — recompile-reproducibility now done; semantic ASM audit still open.**
+   Consensus runs the compiled artifact, not the `.rxd`. As of 2026-06-10 the committed artifacts
+   are confirmed **byte-identical-asm reproducible** from source under two compiler builds
+   (rxdc `1.1.1-v2` and published `1.2.0` — §6.4), and the opcode spot-checks hold (2×
+   state-continuity, 3× MUL/DIV, no 2MUL/2DIV). What remains for the auditor: diff the artifact
+   ASM against the source **semantics** line-by-line (reproducibility proves source↔artifact
+   consistency, not that the compiler lowered the source correctly). The RadiantScript compiler
+   has a documented MUL/DIV-lowering history; confirm independently.
 5. **Owner custody (R3) is unmitigated by design.** Any value added to a pool is recoverable by the
    owner. This is a product decision, not a bug, but it means **the pool is not trustless for
    liquidity providers**. If the audit's mandate is "permissionless AMM", this is a blocker until an
@@ -336,5 +380,7 @@ invalidates the contract's safety argument and is out of this package's scope.
 - Testnet soak plan + monitor script: `docs/TESTNET-SOAK-PLAN.md`, `tools/soak/`.
 - The fix commit for R1/R1b/R2 (contract + artifact): `618d728`
   (*fix(v3): close critical reserve state-hijack drain (R1) + harden pool continuity*).
-- The harness diagnostic fix so state-hijack/brick reject at the script level: this branch
-  (`docs/audit-prep-and-soak`), `test(v3): fix trade-adversarial token-code …`.
+- The harness diagnostic fix so state-hijack/brick reject at the script level: `5afc14a` on `main`
+  (*test(v3): fix trade-adversarial token-code …*).
+- The sell-matrix wrapper: `c77f553`; the rxdc 1.2.0 artifact recompile (asm unchanged): `aa50250`.
+- The 2026-06-10 v3.1.1 re-validation record: SECURITY-AUDIT-v3.md, "Re-verification addendum".

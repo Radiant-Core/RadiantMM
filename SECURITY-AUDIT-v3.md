@@ -9,6 +9,34 @@
 
 **All identified issues fixed and re-verified on regtest; still gated on an external audit + testnet soak before mainnet funds.** v3 fixed the v1 criticals (real coloured-satoshi reserves, code-only continuity, outpoint pairing). This pass found and fixed a new **critical, fully-exploitable fund-loss bug** (R1): the controller did not constrain the *state* of the recreated pool outputs, so any unprivileged user could seize the entire token reserve for a transaction fee — **proven on-chain** (txids below), then closed by pinning code **and state** continuity on both pool UTXOs. The exact exploit is now rejected at script verification, with the full buy/sell adversarial matrix (21 cases) re-validated green and no regression to honest buy/sell/transfer. See [Fixes applied & verification](#fixes-applied--verification).
 
+### Re-verification addendum — 2026-06-10, Radiant-Core v3.1.1
+
+The full validation suite was independently re-run against a cleanly-built **Radiant-Core
+v3.1.1** (`d2957725`, the version all mainnet nodes must run before the `SCRIPT_SECURITY_UPGRADE`
+activation at block 440000). Regtest activates that upgrade from height 0
+(`SecurityUpgradeHeight = 0`), so every result below is under **post-upgrade script semantics**.
+
+- **Buy matrix 13/13** — run on v3.1.0 and again on v3.1.1 (fresh genesis): identical results,
+  `state-hijack`/`brick` reject at the contract's own state-continuity `OP_EQUALVERIFY`.
+- **Sell matrix 7/7** — re-staged from scratch (fresh mined buy) and run on **both** node versions;
+  previously this matrix stood on the 2026-06-04 record only. Now automated:
+  `tools/soak/run-sell-matrix.sh`.
+- **Standalone byte-for-byte R1 exploit** (`trade-attack-state-hijack.cjs`) — REJECTED at
+  `OP_EQUALVERIFY` under v3.1.1.
+- **Artifact reproducibility** — recompiling both `.rxd` sources reproduces the committed
+  artifacts' `asm` **byte-identically** (verified against rxdc `1.1.1-v2`, and again across the
+  rxdc `1.2.0` recompile in `aa50250`; asm SHA-256 unchanged). Opcode check at HEAD: 2×
+  `OP_STATESCRIPTBYTECODE_OUTPUT`, 3× `OP_MUL`/`OP_DIV`, 0× `OP_2MUL`/`OP_2DIV`.
+- **Covenant lint** (rxdc `--covenant-lint`): `RadiantMMToken` zero findings; `RadiantMMPool`
+  12 warnings, all assessed false-positive-by-rule-design (the lint cannot see inequality-bound
+  constraints — a CPMM's binding invariant *is* `kOut >= kIn`) or intended-and-documented
+  (`auth-only-spend` on `withdraw` = the disclosed R3 custody path). The pool would fail
+  `--covenant-lint error` / `--strict` without suppression directives.
+- vitest 50/50, `tsc --noEmit` clean.
+
+The verdict gate is unchanged: external audit + testnet soak remain the blockers before mainnet
+funds (R3 custody and the R4 size cap remain disclosed design decisions).
+
 ---
 
 ## Severity summary
