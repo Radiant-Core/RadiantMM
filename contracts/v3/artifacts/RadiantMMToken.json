@@ -1,6 +1,6 @@
 {
   "version": 9,
-  "compilerVersion": "rxdc 1.1.1-v2",
+  "compilerVersion": "rxdc 1.2.0",
   "contract": "RadiantMMToken",
   "abi": [
     {
