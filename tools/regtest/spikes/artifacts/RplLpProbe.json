@@ -1,0 +1,72 @@
+{
+  "version": 9,
+  "compilerVersion": "rxdc 1.2.0",
+  "contract": "RplLpProbe",
+  "abi": [
+    {
+      "type": "function",
+      "name": "addLiquidity",
+      "index": 0,
+      "params": []
+    },
+    {
+      "type": "constructor",
+      "params": [
+        {
+          "name": "poolRef",
+          "type": "bytes"
+        },
+        {
+          "name": "lpRef",
+          "type": "bytes"
+        }
+      ]
+    }
+  ],
+  "asm": "OP_INPUTINDEX OP_0 OP_NUMEQUALVERIFY OP_PUSHINPUTREFSINGLETON $poolRef OP_DROP $poolRef OP_REFOUTPUTCOUNT_OUTPUTS OP_1 OP_NUMEQUALVERIFY OP_0 OP_OUTPOINTINDEX OP_0 OP_NUMEQUALVERIFY OP_1 OP_OUTPOINTINDEX OP_1 OP_NUMEQUALVERIFY OP_1 OP_OUTPOINTTXHASH OP_0 OP_OUTPOINTTXHASH OP_EQUALVERIFY OP_0 OP_CODESCRIPTBYTECODE_OUTPUT OP_0 OP_CODESCRIPTBYTECODE_UTXO OP_EQUALVERIFY OP_1 OP_CODESCRIPTBYTECODE_OUTPUT OP_1 OP_CODESCRIPTBYTECODE_UTXO OP_EQUALVERIFY OP_1 OP_OUTPUTVALUE OP_1 OP_UTXOVALUE OP_NUMEQUALVERIFY OP_1 OP_STATESCRIPTBYTECODE_OUTPUT OP_1 OP_STATESCRIPTBYTECODE_UTXO OP_EQUALVERIFY OP_0 OP_STATESCRIPTBYTECODE_UTXO OP_1 OP_SPLIT OP_NIP OP_1 OP_SPLIT OP_SWAP OP_BIN2NUM OP_1 OP_NUMEQUALVERIFY OP_BIN2NUM OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY OP_0 OP_STATESCRIPTBYTECODE_OUTPUT OP_1 OP_SPLIT OP_NIP OP_1 OP_SPLIT OP_SWAP OP_BIN2NUM OP_1 OP_NUMEQUALVERIFY OP_BIN2NUM OP_0 OP_UTXOVALUE OP_0 OP_OUTPUTVALUE OP_2DUP OP_SWAP OP_SUB OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY OP_2 OP_PICK 2202 OP_GREATERTHANOREQUAL OP_VERIFY ffffffffffff1f OP_2DUP OP_7 OP_PICK OP_DIV OP_LESSTHANOREQUAL OP_VERIFY OP_SWAP OP_5 OP_PICK OP_MUL OP_3 OP_ROLL OP_DIV OP_DUP OP_0 OP_GREATERTHAN OP_VERIFY OP_3 OP_PICK OP_5 OP_ROLL OP_2 OP_PICK OP_ADD OP_NUMEQUALVERIFY OP_ROT OP_2SWAP OP_SWAP OP_DIV OP_LESSTHANOREQUAL OP_VERIFY $lpRef OP_REFVALUESUM_OUTPUTS $lpRef OP_REFVALUESUM_UTXOS OP_SUB OP_NUMEQUAL",
+  "warnings": [
+    {
+      "rule": "unconstrained-outputs",
+      "message": "outputs are introspected but tx.outputs.length is never constrained — the output set is open-ended (attacker can add outputs).",
+      "line": 35,
+      "column": 20,
+      "functionName": "addLiquidity"
+    },
+    {
+      "rule": "dead-computed-value",
+      "message": "value `R` is computed but never used in a require() or bound to an output — the intended constraint is missing (e.g. a state transition that is never enforced).",
+      "line": 53,
+      "column": 12,
+      "functionName": "addLiquidity"
+    },
+    {
+      "rule": "dead-computed-value",
+      "message": "value `Rp` is computed but never used in a require() or bound to an output — the intended constraint is missing (e.g. a state transition that is never enforced).",
+      "line": 54,
+      "column": 12,
+      "functionName": "addLiquidity"
+    },
+    {
+      "rule": "dead-computed-value",
+      "message": "value `dR` is computed but never used in a require() or bound to an output — the intended constraint is missing (e.g. a state transition that is never enforced).",
+      "line": 55,
+      "column": 12,
+      "functionName": "addLiquidity"
+    },
+    {
+      "rule": "dead-computed-value",
+      "message": "value `MAX` is computed but never used in a require() or bound to an output — the intended constraint is missing (e.g. a state transition that is never enforced).",
+      "line": 60,
+      "column": 12,
+      "functionName": "addLiquidity"
+    },
+    {
+      "rule": "missing-continuity",
+      "message": "the covenant reads its own code script but never asserts codeScriptCount(...) — the covenant may not be carried forward (it can escape into a different/no script).",
+      "line": 35,
+      "column": 48,
+      "functionName": "addLiquidity"
+    }
+  ],
+  "hex": "c0009dd8<poolRef>75<poolRef>de519d00c9009d51c9519d51c800c88800ea00e98851ea51e98851cc51c69d51ec51eb8800eb517f77517f7c81519d817600a06900ec517f77517f7c81519d8100c600cc6e7c947600a0695279022202a26907ffffffffffff1f6e577996a1697c557995537a967600a0695379557a5279939d7b727c96a169<lpRef>dc<lpRef>db949c"
+}

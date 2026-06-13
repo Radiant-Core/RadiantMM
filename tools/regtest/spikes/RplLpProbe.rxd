@@ -1,0 +1,72 @@
+pragma radiantscript ^1.1.0;
+
+// RplLpProbe — Phase-0 spike controller for the RPL-LP LP-share design.
+// Isolates the ONE genuinely new composition vs RadiantSwap Market.rxd: the mint branch
+// reads its OWN in-state scalar shareTotal (S0), computes dS = dR*S0/R from observable value
+// deltas, mutates state to S1 = S0 + dS, and pins the LP-ref VALUE DELTA == dS while a
+// passthrough $lpRef holder may be co-spent. Proves Phase-0 primitives (a) stateful controller
+// state mutate+read, (b) refValueSum-delta invariance to passthrough, and (with LpShareProbe)
+// (c) refType-gated keyless mint — plus the LP-specific arithmetic Market never needed.
+//
+// Deployed STATEFUL (OP_DROP prologue) so the selector dispatches after the state push.
+// state = ver(1)=0x01 || shareTotal(8 LE).
+//
+//   in/out[0] CONTROLLER  state=ver||shareTotal  value=R   $poolRef (singleton)
+//   in/out[1] LP-ANCHOR   state=20-zero MARKER   value=dust $lpRef  (frozen ref carrier)
+//   in [2+]  funding / passthrough LP holder UTXOs
+//   out[2]   minted LP holder (dS)   out[3+] passthrough/change
+contract RplLpProbe(
+    bytes36 constant $poolRef,   // singleton controller identity
+    bytes36 constant $lpRef      // LP-share reference
+) {
+    return {
+        // addLiquidity: deposit dR RXD -> mint dS = dR*S0/R LP shares.
+        addLiquidity() {
+            require(this.activeInputIndex == 0);
+            pushInputRefSingleton($poolRef);
+            require(tx.outputs.refOutputCount($poolRef) == 1);
+
+            // anchor pairing: in[1] co-created with this controller at vout 1 of the same prior tx
+            require(tx.inputs[0].outpointIndex == 0);
+            require(tx.inputs[1].outpointIndex == 1);
+            require(tx.inputs[1].outpointTransactionHash == tx.inputs[0].outpointTransactionHash);
+
+            // code continuity for controller + anchor; anchor fully frozen (value + marker state)
+            require(tx.outputs[0].codeScript == tx.inputs[0].codeScript);
+            require(tx.outputs[1].codeScript == tx.inputs[1].codeScript);
+            require(tx.outputs[1].value == tx.inputs[1].value);
+            require(tx.outputs[1].stateScript == tx.inputs[1].stateScript);
+
+            // --- read S0 from controller state (ver||shareTotal), shape+version pinned ---
+            bytes inPayload = tx.inputs[0].stateScript.split(1)[1];     // 9: ver||shareTotal
+            bytes1 inVer, bytes inShareBin = inPayload.split(1);
+            require(int(inVer) == 1);
+            int S0 = int(inShareBin);
+            require(S0 > 0);                                            // negative-decode guard, immediately
+
+            bytes outPayload = tx.outputs[0].stateScript.split(1)[1];
+            bytes1 outVer, bytes outShareBin = outPayload.split(1);
+            require(int(outVer) == 1);
+            int S1 = int(outShareBin);
+
+            // --- reserve delta ---
+            int R = tx.inputs[0].value;
+            int Rp = tx.outputs[0].value;
+            int dR = Rp - R;
+            require(dR > 0);
+            require(R >= 546);
+
+            // --- dS = dR * S0 / R, overflow-guarded; floor (depositor never over-credited) ---
+            int MAX = 9007199254740991;
+            require(dR <= MAX / S0);
+            int dS = dR * S0 / R;
+            require(dS > 0);
+            require(S1 == S0 + dS);                                     // pin the controller's own supply mutation
+            require(Rp <= MAX / S1);                                    // grow-to-unexitable guard
+
+            // --- pin the LP-ref VALUE DELTA == dS (passthrough holders cancel; anchor dust cancels) ---
+            int mintedDelta = tx.outputs.refValueSum($lpRef) - tx.inputs.refValueSum($lpRef);
+            require(mintedDelta == dS);
+        }
+    };
+}

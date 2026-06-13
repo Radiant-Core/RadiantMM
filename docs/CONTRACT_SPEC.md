@@ -239,6 +239,25 @@ Mitigated by:
 
 Prevented by bytecode continuity check - attacker cannot modify the code portion.
 
+### 7.5 No global circulating-supply read (supply-relative-rate trap)
+
+Radiant has **no opcode that reads the global circulating supply `S` of a fungible ref**. `tx.inputs.refValueSum($ref)` sums only co-spent inputs and `tx.outputs.refValueSum($ref)` sums only created outputs — both are scoped to the current transaction, and the spender chooses which of their own carriers to include. Any covenant that computes a **supply-relative rate** against this value is exploitable:
+
+- A proportional burn payout `payout = burned * R / S_seen` lets a burner who co-spends **only their own** shares set `S_seen == their own stake`, so `payout = R` — the whole reserve drains in one tx.
+- A proportional mint `minted = dR * S / R` bricks on an honest add when no passthrough carrier is co-spent (`S_seen = 0`).
+
+This is the single root cause that failed all three LP-share drafts (see `docs/LP-SHARE-COVENANT-DESIGN.md` §0–1, §8.2).
+
+**Safe pattern — pin a 1:1 collateral DELTA, never an absolute `refValueSum`.** RadiantSwap's [`Market.rxd`](../../RadiantSwap/contracts/Market.rxd) `split`/`merge` (lines 28–81, already in production) computes the collateral delta `n = out[0].value - in[0].value` and requires the ref-value delta to match it:
+
+```
+int n = tx.outputs[0].value - tx.inputs[0].value;
+require(n > 0);
+require(tx.outputs.refValueSum($shareRef) - tx.inputs.refValueSum($shareRef) == n);
+```
+
+A delta is presence- and padding-invariant (any passthrough carrier cancels between the input and output sums), so it is not spender-selectable. Where a share→reserve scale is genuinely unavoidable (LP shares), use an authenticated in-controller `shareTotal` scalar that the singleton controller is the sole authority to mutate, with every mutation itself delta-pinned — **never** an absolute `refValueSum` denominator. See `docs/LP-SHARE-COVENANT-DESIGN.md`.
+
 ---
 
 ## 8. Appendix: Opcode Reference

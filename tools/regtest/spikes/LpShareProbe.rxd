@@ -1,0 +1,41 @@
+pragma radiantscript ^1.1.0;
+
+// LpShareProbe — Phase-0 LP-share token (clone of RadiantSwap ShareToken.rxd with
+// $shareRef->$lpRef, $marketRef->$poolRef). One code, two roles by state section:
+//   * Holder UTXO: state = <20-byte holderPkh>. Spent via transfer() with the holder's sig.
+//   * Anchor UTXO: state = <20 zero MARKER>. Spent via vaultMove() WITHOUT a signature, ONLY
+//     when the genuine pool controller singleton ($poolRef) is co-spent (refType runtime gate).
+//
+// Proves Phase-0 primitive (c): keyless mint is gated on the controller, and a plain holder
+// transfer needs NO $poolRef co-spent (no static ref-induction taint).
+contract LpShareProbe(
+    bytes36 constant $lpRef,      // this share's reference
+    bytes36 constant $poolRef     // singleton ref of the pool controller that authorises minting
+) {
+    return {
+        // Holder-to-holder transfer (signature gated); supply conserved. NO $poolRef required.
+        transfer(pubkey senderPk, sig s) {
+            require(checkSig(s, senderPk));
+            bytes20 pkh = bytes20(tx.inputs[this.activeInputIndex].stateScript.split(1)[1]);
+            require(hash160(senderPk) == pkh);
+
+            pushInputRef($lpRef);
+            bytes32 csh = hash256(tx.inputs[this.activeInputIndex].codeScript);
+            require(tx.outputs.codeScriptCount(csh) == tx.outputs.refOutputCount($lpRef));
+            require(tx.inputs.codeScriptValueSum(csh) == tx.outputs.codeScriptValueSum(csh));
+        },
+
+        // Anchor mint/burn path (no signature). MARKER state only, authorised solely by the genuine
+        // pool controller singleton being co-spent. Supply CHANGE allowed; the controller pins the
+        // exact delta. Enforces escape-prevention only.
+        vaultMove() {
+            bytes20 marker = bytes20(tx.inputs[this.activeInputIndex].stateScript.split(1)[1]);
+            require(marker == 0x0000000000000000000000000000000000000000);
+            require(tx.inputs.refType($poolRef) == 2);
+
+            pushInputRef($lpRef);
+            bytes32 csh = hash256(tx.inputs[this.activeInputIndex].codeScript);
+            require(tx.outputs.codeScriptCount(csh) == tx.outputs.refOutputCount($lpRef));
+        }
+    };
+}
